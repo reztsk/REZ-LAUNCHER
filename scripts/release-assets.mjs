@@ -10,7 +10,7 @@ import path from "node:path";
 
 const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
 const v = conf.version;
-const repo = process.env.GITHUB_REPOSITORY || "reztsk/GameREZ";
+const repo = process.env.GITHUB_REPOSITORY || "reztsk/REZ-LAUNCHER";
 const nsisDir = "src-tauri/target/release/bundle/nsis";
 const out = "release-out";
 const assets = path.join(out, "assets");

@@ -19,7 +19,7 @@ use crate::launchers::{self, LauncherInfo};
 use crate::settings::Settings;
 use crate::watcher::{self, RunningGame, Tracker};
 
-pub const REPO_URL: &str = "https://github.com/reztsk/GameREZ";
+pub const REPO_URL: &str = "https://github.com/reztsk/REZ-LAUNCHER";
 
 pub struct AppState {
     pub db: Arc<Database>,

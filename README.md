@@ -63,7 +63,7 @@ Un jeu repéré déclenche une pop-up. « Oui » crée une fiche dans la bibliot
 
 ## Installation
 
-1. Va sur la page [**Releases**](https://github.com/reztsk/GameREZ/releases/latest).
+1. Va sur la page [**Releases**](https://github.com/reztsk/REZ-LAUNCHER/releases/latest).
 2. Télécharge **`REZ-launcher_x.y.z_x64-setup.exe`** et lance-le.
    - Installation pour ton compte uniquement (pas de droits admin) dans `%LOCALAPPDATA%\REZ launcher`.
    - Raccourci **bureau** + menu Démarrer avec l'icône REZ launcher.

@@ -51,7 +51,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "homepage": "https://github.com/reztsk/GameREZ",
+    "homepage": "https://github.com/reztsk/REZ-LAUNCHER",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
@@ -75,7 +75,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI5NzgwMzA3RjIzMUU1NzYKUldSMjVUSHlCd040S2QyUmIwK21wbFIvaDU2aVFpWDFTVmhFREkrN01BTTJuVTdFUmp5SkwzMnoK",
       "endpoints": [
-        "https://github.com/reztsk/GameREZ/releases/latest/download/latest.json"
+        "https://github.com/reztsk/REZ-LAUNCHER/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
