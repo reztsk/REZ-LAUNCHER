@@ -17,6 +17,9 @@ use crate::error::{AppError, AppResult};
 use crate::exe_info::{self, ScannedExe};
 use crate::launchers::{self, LauncherInfo};
 use crate::settings::Settings;
+use crate::social::{self, Profile, PublicProfile, Social, SocialState};
+use crate::sysreg;
+use crate::uninstall::{self, UninstallFinished, UninstallPlan};
 use crate::watcher::{self, RunningGame, Tracker};
 
 pub const REPO_URL: &str = "https://github.com/reztsk/REZ-LAUNCHER";
@@ -27,6 +30,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub covers_dir: PathBuf,
     pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
+    pub social: Arc<Social>,
+    /// Games whose official uninstaller is running.
+    pub uninstalling: Arc<Mutex<HashSet<i64>>>,
 }
 
 #[tauri::command]
@@ -88,6 +94,316 @@ pub fn delete_game(state: State<'_, AppState>, id: i64) -> AppResult<()> {
         let _ = std::fs::remove_file(cover);
     }
     Ok(())
+}
+
+/// Save the manual order of the library (drag & drop).
+#[tauri::command]
+pub fn reorder_games(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<()> {
+    if ids.len() > 10_000 {
+        return Err(AppError::Invalid("Liste trop longue.".into()));
+    }
+    state.db.reorder_games(&ids)
+}
+
+// ================================================================ Uninstall
+
+/// How a game would be uninstalled (`None`: no official uninstaller found).
+#[tauri::command]
+pub async fn uninstall_info(
+    state: State<'_, AppState>,
+    id: i64,
+) -> AppResult<Option<UninstallPlan>> {
+    let game = state.db.get_game(id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall::find(&game, &sysreg::uninstall_entries()).map(|(_, plan)| plan)
+    })
+    .await
+    .map_err(|e| AppError::Other(e.to_string()))
+}
+
+/// Run the game's official uninstaller in the background. When it is done and
+/// the game is gone from disk, the game leaves the library; `game-uninstalled`
+/// is emitted either way.
+#[tauri::command]
+pub fn uninstall_game(app: AppHandle, state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    if state.tracker.list().iter().any(|r| r.game_id == id) {
+        return Err(AppError::Invalid(
+            "Ferme le jeu avant de le désinstaller.".into(),
+        ));
+    }
+    let game = state.db.get_game(id)?;
+    let (method, _) = uninstall::find(&game, &sysreg::uninstall_entries()).ok_or_else(|| {
+        AppError::Invalid(
+            "Aucun désinstallateur officiel trouvé pour ce jeu. Désinstalle-le depuis son launcher ou les Paramètres Windows.".into(),
+        )
+    })?;
+    if !state
+        .uninstalling
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id)
+    {
+        return Err(AppError::Invalid("Désinstallation déjà en cours.".into()));
+    }
+    let busy = state.uninstalling.clone();
+    let release = move || {
+        busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    };
+    let started = match &method {
+        uninstall::Method::Steam(app_id) => app
+            .opener()
+            .open_url(format!("steam://uninstall/{app_id}"), None::<&str>)
+            .map(|_| None)
+            .map_err(|e| AppError::Other(format!("Steam indisponible : {e}"))),
+        uninstall::Method::Command { program, args } => uninstall::start(program, args).map(Some),
+    };
+    let pid = match started {
+        Ok(p) => p,
+        Err(e) => {
+            release();
+            return Err(e);
+        }
+    };
+    let db = state.db.clone();
+    let covers_dir = state.covers_dir.clone();
+    std::thread::spawn(move || {
+        let removed = match pid {
+            Some(pid) => {
+                uninstall::wait_process_tree(pid, std::time::Duration::from_secs(2 * 3600));
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                uninstall::is_gone(&game)
+            }
+            // Steam: the user confirms in Steam, then Steam deletes the files.
+            None => uninstall::wait_until_gone(&game, std::time::Duration::from_secs(15 * 60)),
+        };
+        if removed && db.delete_game(game.id).is_ok() {
+            let cover = Path::new(&game.cover_image_url);
+            if cover.starts_with(&covers_dir) {
+                let _ = std::fs::remove_file(cover);
+            }
+        }
+        release();
+        let _ = app.emit(
+            "game-uninstalled",
+            UninstallFinished {
+                game_id: game.id,
+                title: game.title.clone(),
+                removed,
+            },
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn uninstalling_games(state: State<'_, AppState>) -> Vec<i64> {
+    state
+        .uninstalling
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .collect()
+}
+
+// ================================================================ Profile & friends
+
+#[tauri::command]
+pub fn get_profile(state: State<'_, AppState>) -> Profile {
+    Profile::load(&state.db)
+}
+
+#[tauri::command]
+pub fn save_profile(state: State<'_, AppState>, profile: Profile) -> AppResult<Profile> {
+    let current = Profile::load(&state.db);
+    let mut p = profile.normalized()?;
+    p.id = current.id; // the id never changes
+    p.save(&state.db)?;
+    Ok(p)
+}
+
+/// A local image imported into REZ launcher (covers folder only), as a data URL,
+/// so the UI can render small framed thumbnails of the avatar and banner.
+#[tauri::command]
+pub fn image_data_url(state: State<'_, AppState>, path: String) -> AppResult<String> {
+    let p = std::fs::canonicalize(path.trim())
+        .map_err(|_| AppError::Invalid("Image introuvable.".into()))?;
+    let root = std::fs::canonicalize(&state.covers_dir)
+        .map_err(|_| AppError::Invalid("Image introuvable.".into()))?;
+    if !p.starts_with(&root) {
+        return Err(AppError::Invalid(
+            "Image hors du dossier de REZ launcher.".into(),
+        ));
+    }
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "avif" => "image/avif",
+        _ => {
+            return Err(AppError::Invalid(
+                "Format d'image non pris en charge.".into(),
+            ))
+        }
+    };
+    if std::fs::metadata(&p)?.len() > 20 * 1024 * 1024 {
+        return Err(AppError::Invalid("Image trop lourde (20 Mo max).".into()));
+    }
+    Ok(format!(
+        "data:{mime};base64,{}",
+        social::base64(&std::fs::read(&p)?)
+    ))
+}
+
+pub fn social_ctx(app: &AppHandle, state: &AppState) -> social::Ctx {
+    let emitter = app.clone();
+    social::Ctx {
+        db: state.db.clone(),
+        tracker: state.tracker.clone(),
+        notify: Arc::new(move || {
+            let _ = emitter.emit("social-updated", ());
+        }),
+    }
+}
+
+/// Start / stop the local network presence to match the settings.
+pub fn sync_social(app: &AppHandle, state: &AppState, enabled: bool) {
+    if enabled {
+        state.social.start(social_ctx(app, state));
+    } else {
+        state.social.stop();
+    }
+    let _ = app.emit("social-updated", ());
+}
+
+#[tauri::command]
+pub fn social_state(state: State<'_, AppState>) -> SocialState {
+    state.social.state(&state.db)
+}
+
+fn online_addr(state: &AppState, id: &str) -> AppResult<std::net::SocketAddr> {
+    if !state.social.is_on() {
+        return Err(AppError::Invalid(
+            "Active d'abord les amis (réseau local).".into(),
+        ));
+    }
+    state.social.peer_addr(id).ok_or_else(|| {
+        AppError::Invalid(
+            "Cette personne n'est pas visible sur ton réseau local en ce moment.".into(),
+        )
+    })
+}
+
+/// Send a friend request to someone visible on the network (by id or friend code).
+#[tauri::command]
+pub async fn add_friend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<String> {
+    let id = social::parse_code(&id).ok_or_else(|| {
+        AppError::Invalid("Code ami invalide (format REZ-XXXX-XXXX-XXXX).".into())
+    })?;
+    if id == Profile::load(&state.db).id {
+        return Err(AppError::Invalid("C'est ton propre code ami.".into()));
+    }
+    let addr = online_addr(&state, &id)?;
+    let db = state.db.clone();
+    let body = social::identity(&db, "friend_req");
+    let reply = tauri::async_runtime::spawn_blocking(move || social::request(addr, &body))
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))??;
+    if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(AppError::Other(
+            "Demande refusée par l'autre REZ launcher.".into(),
+        ));
+    }
+    let final_state = if reply.get("state").and_then(|v| v.as_str()) == Some("friend") {
+        "friend"
+    } else {
+        "outgoing"
+    };
+    let name = state
+        .social
+        .state(&db)
+        .peers
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "Ami".into());
+    db.upsert_friend(&id, &name, "", final_state)?;
+    let _ = app.emit("social-updated", ());
+    Ok(final_state.into())
+}
+
+/// Accept or decline a request.
+#[tauri::command]
+pub async fn answer_friend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    accept: bool,
+) -> AppResult<()> {
+    if !accept {
+        state.db.remove_friend(&id)?;
+        let _ = app.emit("social-updated", ());
+        return Ok(());
+    }
+    if state.db.friend_state(&id)?.is_none() {
+        return Err(AppError::Invalid("Demande introuvable.".into()));
+    }
+    let addr = online_addr(&state, &id)?;
+    let body = social::identity(&state.db, "friend_ok");
+    tauri::async_runtime::spawn_blocking(move || social::request(addr, &body))
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))??;
+    let name = state
+        .db
+        .list_friends()?
+        .into_iter()
+        .find(|f| f.id == id)
+        .map(|f| f.name)
+        .unwrap_or_default();
+    state.db.upsert_friend(&id, &name, "", "friend")?;
+    let _ = app.emit("social-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_friend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<()> {
+    if let Some(addr) = state.social.peer_addr(&id) {
+        let body = social::identity(&state.db, "unfriend");
+        let _ = tauri::async_runtime::spawn_blocking(move || social::request(addr, &body)).await;
+    }
+    state.db.remove_friend(&id)?;
+    let _ = app.emit("social-updated", ());
+    Ok(())
+}
+
+/// Someone's profile, fetched live from their PC.
+#[tauri::command]
+pub async fn friend_profile(state: State<'_, AppState>, id: String) -> AppResult<PublicProfile> {
+    let addr = online_addr(&state, &id)?;
+    let db = state.db.clone();
+    let p = tauri::async_runtime::spawn_blocking(move || social::fetch_profile(addr))
+        .await
+        .map_err(|e| AppError::Other(e.to_string()))??;
+    if p.id != id {
+        return Err(AppError::Other(
+            "Profil reçu d'un autre REZ launcher.".into(),
+        ));
+    }
+    let _ = db.refresh_friend(&id, &p.name, &p.avatar);
+    Ok(p)
 }
 
 #[tauri::command]
@@ -303,6 +619,9 @@ pub fn save_settings(
         }
     }
     s.save(&state.db)?;
+    if s.social_enabled != state.social.is_on() {
+        sync_social(&app, &state, s.social_enabled);
+    }
     Ok(s)
 }
 
@@ -452,6 +771,8 @@ pub fn resolve_detections(
                     cover_zoom: 1.0,
                     cover_x: 50.0,
                     cover_y: 50.0,
+                    kind: d.kind,
+                    collection: String::new(),
                 })?);
                 done.push(key);
             }
@@ -487,10 +808,12 @@ pub struct CacheReport {
 /// and the web cache of remote covers. Library and playtime are kept.
 #[tauri::command]
 pub fn clear_cache(app: AppHandle, state: State<'_, AppState>) -> AppResult<CacheReport> {
+    let profile = Profile::load(&state.db);
     let used: HashSet<String> = state
         .db
         .cover_paths()?
         .into_iter()
+        .chain([profile.avatar.url, profile.banner.url])
         .map(|p| p.to_lowercase())
         .collect();
     let mut report = CacheReport {
@@ -625,6 +948,10 @@ mod tests {
             cover_zoom: 1.0,
             cover_x: 50.0,
             cover_y: 50.0,
+            kind: crate::db::Kind::Game,
+            collection: String::new(),
+            platform: "pc".into(),
+            sort_order: 0,
         }
     }
 
@@ -642,6 +969,7 @@ mod tests {
             executable_path: exe.into(),
             install_dir: dir.into(),
             source: "folder".into(),
+            kind: Default::default(),
         };
         assert!(in_library(
             &d(r"d:\jeux\hades", r"D:\Jeux\Hades\x64\Hades.exe"),

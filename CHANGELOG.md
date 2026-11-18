@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.0
+
+- **Profil** : photo de profil et bannière (import, déplacer, zoomer, centrer), pseudo, bio et code ami. **Vitrine** de 6 jeux favoris affichés en boîtes 3D, à épingler depuis le profil ou le menu d'un jeu.
+- **Amis sur le réseau local** : ajoute tes potes avec leur code ami ou depuis la liste « Sur ton réseau », vois en direct qui est en ligne, en jeu (et à quoi) ou hors ligne, et consulte leur profil et leur vitrine. Pair-à-pair, sans compte ni serveur, désactivé par défaut.
+- **Désinstaller** (menu d'options d'un jeu) : lance le désinstallateur officiel du jeu (entrée Windows « Applications », fenêtre de désinstallation Steam ou `unins000.exe`), attend la fin, puis retire le jeu de la bibliothèque.
+- **Jeux et logiciels séparés** : Wallpaper Engine, Crosshair X, Lossless Scaling, overlays, outils de benchmark… vont dans le nouvel onglet **Logiciels**, plus dans tes jeux. Reclassement en un clic depuis le menu d'un jeu.
+- **Catégories et ordre libre** : regroupement automatique **par plateforme** (Steam, Epic, EA, Ubisoft, Battle.net, Rockstar, GOG…) ou **par catégorie** perso (FPS, Coop…), et tri **« Mon ordre »** : glisse les jeux pour les réordonner.
+- **Launchers mieux détectés** : lecture (seule) du registre Windows et des entrées « Applications » en plus des dossiers habituels et d'AppData. Ajout du **Rockstar Games Launcher**.
+- **Mode Boîte 3D réparé** : la grille affiche de vraies boîtes 3D (tranche avec le titre visible), et la boîte s'ouvre toujours côté tranche ; les côtés ne se confondent plus avec le fond.
+- **Interface plus sobre** : suppression de tous les halos et reflets lumineux qui suivaient la souris (cartes, boutons, verre).
+- Correctif : les animations ne restent plus figées à l'écran après une session de jeu.
+
 ## v0.3.0
 
 - **Fenêtre automatique pendant le jeu** : REZ launcher se réduit dans la barre des tâches dès que la fenêtre du jeu apparaît, coupe ses animations, puis revient au premier plan à la fermeture du jeu (réglable dans *Paramètres › Lancement des jeux*).

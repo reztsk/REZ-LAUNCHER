@@ -577,6 +577,10 @@ mod tests {
             cover_zoom: 1.0,
             cover_x: 50.0,
             cover_y: 50.0,
+            kind: crate::db::Kind::Game,
+            collection: String::new(),
+            platform: "pc".into(),
+            sort_order: 0,
         };
         assert_eq!(watch_dir_for(&g), Some(PathBuf::from(r"D:\Jeux\Hero\bin")));
     }
@@ -607,6 +611,8 @@ mod tests {
                 cover_zoom: 1.0,
                 cover_x: 50.0,
                 cover_y: 50.0,
+                kind: Default::default(),
+                collection: String::new(),
             })
             .unwrap();
         let start = chrono::Utc::now();

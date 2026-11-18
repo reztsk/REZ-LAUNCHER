@@ -1,6 +1,6 @@
 // In-memory backend used only when the UI is opened in a plain browser
 // (`npm run dev` without Tauri) — handy for UI work and screenshots.
-import type { Api, Detected, Events, Game, GameInput, GameReady, GameStopped, RunningGame, Settings, UpdateProgress } from "./api";
+import type { Api, Detected, Events, FriendView, Game, GameInput, GameReady, GameStopped, Platform, Profile, PublicProfile, RunningGame, Settings, SocialState, UninstallFinished, UpdateProgress } from "./api";
 
 /** Demo artwork (SVG data URL) so covers, the 3D box and the editor have real images. */
 function art(title: string, a: string, b: string, wide = false): string {
@@ -16,13 +16,26 @@ function art(title: string, a: string, b: string, wide = false): string {
   </svg>`;
   return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
 }
-const framing = { description: "", cover_zoom: 1, cover_x: 50, cover_y: 50 };
+const framing = { description: "", cover_zoom: 1, cover_x: 50, cover_y: 50, kind: "game" as const, collection: "", platform: "pc" as Platform, sort_order: 0 };
+
+/** Same rules as detect::platform_of (Rust). */
+function plat(path: string): Platform {
+  const p = path.toLowerCase();
+  if (p.includes("\\steamapps\\")) return "steam";
+  if (/\\epic ?games\\/.test(p)) return "epic";
+  if (/\\gog( games| galaxy|galaxy)\\/.test(p)) return "gog";
+  if (/\\(ea games|electronic arts|eaapp)\\/.test(p)) return "ea";
+  if (p.includes("\\ubisoft")) return "ubisoft";
+  if (p.includes("\\battle.net\\")) return "battlenet";
+  if (p.includes("\\rockstar games\\")) return "rockstar";
+  return "pc";
+}
 
 const now = Date.now();
 const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
 const H = 3_600_000;
 
-let nextId = 7;
+let nextId = 9;
 const games: Game[] = [
   { id: 1, title: "Neon Drift", executable_path: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift\\NeonDrift.exe", install_dir: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift", cover_image_url: art("Neon Drift", "#0e7490", "#22d3ee"), version: "1.4.2", playtime_minutes: 2535, category: "installed", added_at: iso(900 * H), last_played_at: iso(3 * H), exe_missing: false, session_count: 37, ...framing, description: "Course futuriste dans une mégapole de néons. Drift, boost et duels en ligne à 200 km/h.\n\nObjectif : finir la ligue Platine." },
   { id: 2, title: "Hollow Depths", executable_path: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths\\hollow.exe", install_dir: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths", cover_image_url: art("Hollow Depths", "#3f3f46", "#e4e4e7"), version: "1.5.78", playtime_minutes: 4210, category: "installed", added_at: iso(1200 * H), last_played_at: iso(30 * H), exe_missing: false, session_count: 52, ...framing },
@@ -30,7 +43,16 @@ const games: Game[] = [
   { id: 4, title: "Steam", executable_path: "D:\\Jeux\\Steam\\steam.exe", install_dir: "D:\\Jeux\\Steam", cover_image_url: "", version: "", playtime_minutes: 0, category: "launcher", added_at: iso(1500 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing },
   { id: 5, title: "Circuit Breakers", executable_path: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers\\CB-Win64-Shipping.exe", install_dir: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers", cover_image_url: art("Circuit Breakers", "#b45309", "#fbbf24"), version: "2.0.1", playtime_minutes: 95, category: "installed", added_at: iso(50 * H), last_played_at: iso(48 * H), exe_missing: false, session_count: 3, ...framing },
   { id: 6, title: "Pixel Odyssey", executable_path: "", install_dir: "", cover_image_url: "", version: "", playtime_minutes: 0, category: "not_installed", added_at: iso(10 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing },
+  { id: 7, title: "Wallpaper Engine", executable_path: "D:\\Jeux\\Steam\\steamapps\\common\\wallpaper_engine\\wallpaper32.exe", install_dir: "D:\\Jeux\\Steam\\steamapps\\common\\wallpaper_engine", cover_image_url: "", version: "2.6", playtime_minutes: 0, category: "installed", added_at: iso(70 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing, kind: "software" },
+  { id: 8, title: "Crosshair X", executable_path: "D:\\Jeux\\Steam\\steamapps\\common\\Crosshair X\\CrosshairX.exe", install_dir: "D:\\Jeux\\Steam\\steamapps\\common\\Crosshair X", cover_image_url: "", version: "", playtime_minutes: 0, category: "installed", added_at: iso(60 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing, kind: "software" },
 ];
+games.forEach((g, i) => {
+  g.platform = plat(g.install_dir + "\\" + g.executable_path);
+  g.sort_order = i + 1;
+});
+games[0].collection = "Course";
+games[4].collection = "Coop";
+games[1].collection = "Aventure";
 const running = new Map<number, RunningGame>();
 const params = new URLSearchParams(location.search);
 let settings: Settings = {
@@ -49,6 +71,7 @@ let settings: Settings = {
   launch_animation: true,
   minimize_on_launch: true,
   restore_on_exit: true,
+  social_enabled: params.has("social"),
 };
 const det = (title: string, source: Detected["source"], dir: string, exe: string): Detected => ({
   key: dir.toLowerCase(),
@@ -56,12 +79,48 @@ const det = (title: string, source: Detected["source"], dir: string, exe: string
   executable_path: `${dir}\\${exe}`,
   install_dir: dir,
   source,
+  kind: /wallpaper|crosshair/i.test(title) ? "software" : "game",
 });
 let detections: Detected[] = [
   det("Portal 2", "steam", "D:\\Jeux\\Steam\\steamapps\\common\\Portal 2", "portal2.exe"),
   det("Hades", "epic", "D:\\Jeux\\EpicGames\\Games\\Hades", "x64\\Hades.exe"),
   det("Celeste", "folder", "D:\\Jeux\\Celeste", "Celeste.exe"),
+  det("Lossless Scaling", "steam", "D:\\Jeux\\Steam\\steamapps\\common\\Lossless Scaling", "LosslessScaling.exe"),
 ];
+const uninstalledCbs: ((p: UninstallFinished) => void)[] = [];
+const socialCbs: (() => void)[] = [];
+const uninstalling = new Set<number>();
+let profile: Profile = {
+  id: "7F3A9C21B0E4",
+  name: params.get("name") ?? "REZ",
+  bio: "Chasseur de 100 %. Toujours partant pour une partie en coop.",
+  avatar: { url: "", zoom: 1, x: 50, y: 50 },
+  banner: { url: "", zoom: 1, x: 50, y: 50 },
+  avatar_thumb: "",
+  banner_thumb: "",
+  showcase: [1, 2, 5],
+};
+const code = (id: string) => `REZ-${id.slice(0, 4)}-${id.slice(4, 8)}-${id.slice(8)}`;
+let friends: FriendView[] = [
+  { id: "A1B2C3D4E5F6", code: code("A1B2C3D4E5F6"), name: "Sam", avatar: "", state: "friend", status: "ingame", game: "Neon Drift" },
+  { id: "0F0E0D0C0B0A", code: code("0F0E0D0C0B0A"), name: "Kenji", avatar: "", state: "friend", status: "offline", game: "" },
+  { id: "9988776655AA", code: code("9988776655AA"), name: "Nox", avatar: "", state: "incoming", status: "online", game: "" },
+];
+let peers = [
+  { id: "1234ABCD5678", code: code("1234ABCD5678"), name: "Lina", status: "ingame" as const, game: "Hollow Depths" },
+  { id: "CAFE0000BEEF", code: code("CAFE0000BEEF"), name: "Max", status: "online" as const, game: "" },
+];
+const socialNotify = () => setTimeout(() => socialCbs.forEach((cb) => cb()), 50);
+function socialState(): SocialState {
+  const on = settings.social_enabled;
+  return {
+    enabled: on,
+    error: null,
+    me: { id: profile.id, code: code(profile.id), name: profile.name },
+    peers: on ? peers : [],
+    friends: friends.map((f) => (on ? f : { ...f, status: "offline" as const, game: "" })),
+  };
+}
 const progressCbs: ((p: UpdateProgress) => void)[] = [];
 const startedCbs: ((p: RunningGame) => void)[] = [];
 const readyCbs: ((p: GameReady) => void)[] = [];
@@ -73,13 +132,13 @@ const find = (id: number) => {
   if (!g) throw new Error(`Jeu introuvable (id ${id})`);
   return g;
 };
-const apply = (g: Game, i: GameInput) => Object.assign(g, i, { title: i.title.trim() });
+const apply = (g: Game, i: GameInput) => Object.assign(g, i, { title: i.title.trim(), collection: i.collection.trim(), platform: plat(i.install_dir + "\\" + i.executable_path) });
 
 export const mockApi: Api = {
   listGames: () => delay(games),
   addGame: (input) => {
     if (!input.title.trim()) return Promise.reject("Le titre est obligatoire.");
-    const g = apply({ id: nextId++, playtime_minutes: 0, added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing } as Game, input);
+    const g = apply({ id: nextId++, playtime_minutes: 0, added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing, sort_order: nextId + 100 } as Game, input);
     games.push(g);
     return delay(g);
   },
@@ -87,6 +146,84 @@ export const mockApi: Api = {
   deleteGame: (id) => {
     games.splice(games.findIndex((g) => g.id === id), 1);
     return delay(undefined);
+  },
+  reorderGames: (ids) => {
+    ids.forEach((id, i) => {
+      const g = games.find((x) => x.id === id);
+      if (g) g.sort_order = i + 1;
+    });
+    games.sort((a, b) => a.sort_order - b.sort_order);
+    return delay(undefined);
+  },
+  uninstallInfo: (id) => {
+    const g = find(id);
+    if (!g.executable_path) return delay(null);
+    return delay(
+      g.platform === "steam"
+        ? { via: "steam" as const, detail: "Fenêtre de désinstallation de Steam" }
+        : { via: "inno" as const, detail: `${g.install_dir}\\unins000.exe` },
+    );
+  },
+  uninstallGame: (id) => {
+    const g = find(id);
+    uninstalling.add(id);
+    setTimeout(() => {
+      uninstalling.delete(id);
+      games.splice(games.findIndex((x) => x.id === id), 1);
+      uninstalledCbs.forEach((cb) => cb({ game_id: id, title: g.title, removed: true }));
+    }, 4000);
+    return delay(undefined);
+  },
+  uninstallingGames: () => delay([...uninstalling]),
+  getProfile: () => delay(profile),
+  imageDataUrl: (path) => delay(path),
+  saveProfile: (p) => {
+    if (!p.name.trim()) return Promise.reject("Choisis un pseudo.");
+    profile = { ...p, id: profile.id, name: p.name.trim().slice(0, 32), showcase: [...new Set(p.showcase)].slice(0, 6) };
+    return delay(profile);
+  },
+  socialState: () => delay(socialState()),
+  addFriend: (raw) => {
+    const id = raw.replace(/[^0-9a-z]/gi, "").toUpperCase().replace(/^REZ/, "");
+    const peer = peers.find((p) => p.id === id);
+    if (!peer) return Promise.reject("Cette personne n'est pas visible sur ton réseau local en ce moment.");
+    peers = peers.filter((p) => p.id !== id);
+    friends = [...friends, { ...peer, avatar: "", state: "outgoing" }];
+    socialNotify();
+    // The other side accepts after a moment.
+    setTimeout(() => {
+      friends = friends.map((f) => (f.id === id ? { ...f, state: "friend" } : f));
+      socialNotify();
+    }, 2500);
+    return delay("outgoing" as const);
+  },
+  answerFriend: (id, accept) => {
+    friends = accept ? friends.map((f) => (f.id === id ? { ...f, state: "friend" } : f)) : friends.filter((f) => f.id !== id);
+    socialNotify();
+    return delay(undefined);
+  },
+  removeFriend: (id) => {
+    friends = friends.filter((f) => f.id !== id);
+    socialNotify();
+    return delay(undefined);
+  },
+  friendProfile: (id) => {
+    const f = friends.find((x) => x.id === id) ?? peers.find((x) => x.id === id);
+    if (!f || f.status === "offline") return Promise.reject("Cette personne n'est pas visible sur ton réseau local en ce moment.");
+    const p: PublicProfile = {
+      id,
+      name: f.name,
+      bio: "Main support, fan de roguelites.",
+      avatar: "",
+      banner: "",
+      status: f.status,
+      game: f.game,
+      showcase: [
+        { title: "Neon Drift", playtime_minutes: 1260, cover: "" },
+        { title: "Hollow Depths", playtime_minutes: 640, cover: "" },
+      ],
+    };
+    return delay(p, 400);
   },
   launchGame: (id) => {
     const g = find(id);
@@ -119,7 +256,8 @@ export const mockApi: Api = {
       { id: "battlenet", name: "Battle.net", publisher: "Blizzard", download_url: "https://www.blizzard.com/download/", recommended_folder: "BattleNet", detected_exe: null },
       { id: "ubisoft", name: "Ubisoft Connect", publisher: "Ubisoft", download_url: "https://ubisoftconnect.com/", recommended_folder: "UbisoftConnect", detected_exe: null },
       { id: "gog", name: "GOG Galaxy", publisher: "GOG", download_url: "https://www.gog.com/galaxy", recommended_folder: "GOGGalaxy", detected_exe: null },
-      { id: "ea", name: "EA app", publisher: "Electronic Arts", download_url: "https://www.ea.com/ea-app", recommended_folder: "EAapp", detected_exe: null },
+      { id: "ea", name: "EA app", publisher: "Electronic Arts", download_url: "https://www.ea.com/ea-app", recommended_folder: "EAapp", detected_exe: "C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EADesktop.exe" },
+      { id: "rockstar", name: "Rockstar Games", publisher: "Rockstar Games", download_url: "https://www.rockstargames.com/downloads", recommended_folder: "RockstarGames", detected_exe: null },
     ]),
   openLauncherDownload: () => delay(undefined),
   listDrives: () =>
@@ -130,7 +268,9 @@ export const mockApi: Api = {
   createFolder: (path) => delay(path),
   getSettings: () => delay(settings),
   saveSettings: (s) => {
+    const social = s.social_enabled !== settings.social_enabled;
     settings = { ...s };
+    if (social) socialNotify();
     return delay(settings);
   },
   pickFolder: () => delay("E:\\Games"),
@@ -141,7 +281,7 @@ export const mockApi: Api = {
     detections = detections.filter((d) => !keys.includes(d.key) || action === "later");
     if (action !== "add") return delay([]);
     const added = picked.map((d) => {
-      const g: Game = { id: nextId++, title: d.title, executable_path: d.executable_path, install_dir: d.install_dir, cover_image_url: "", version: "", playtime_minutes: 0, category: "installed", added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing };
+      const g: Game = { id: nextId++, title: d.title, executable_path: d.executable_path, install_dir: d.install_dir, cover_image_url: "", version: "", playtime_minutes: 0, category: "installed", added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing, kind: d.kind, platform: plat(d.install_dir + "\\"), sort_order: nextId };
       games.push(g);
       return g;
     });
@@ -188,6 +328,14 @@ export const mockEvents: Events = {
     return Promise.resolve(() => {});
   },
   onGamesDetected: () => Promise.resolve(() => {}),
+  onGameUninstalled: (cb) => {
+    uninstalledCbs.push(cb);
+    return Promise.resolve(() => {});
+  },
+  onSocialUpdated: (cb) => {
+    socialCbs.push(cb);
+    return Promise.resolve(() => {});
+  },
   onUpdateProgress: (cb) => {
     progressCbs.push(cb);
     return Promise.resolve(() => {});

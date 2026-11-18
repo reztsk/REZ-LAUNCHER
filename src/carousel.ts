@@ -62,7 +62,7 @@ export function mountCarousel(root: HTMLElement, ctx: CarouselCtx): void {
       const box = el.querySelector<HTMLElement>(".box3d");
       if (box) {
         box.classList.toggle("idle", o === 0);
-        box.style.setProperty("--by", o === 0 ? "-14deg" : "0deg");
+        box.style.setProperty("--by", o === 0 ? "16deg" : "0deg");
         box.style.setProperty("--bx", o === 0 ? "-4deg" : "0deg");
       }
     });

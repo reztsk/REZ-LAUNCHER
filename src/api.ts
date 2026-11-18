@@ -3,6 +3,9 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Category = "installed" | "not_installed" | "launcher";
+/** Game, or software / utility (overlays, wallpaper, benchmarks…). */
+export type Kind = "game" | "software";
+export type Platform = "steam" | "epic" | "gog" | "ea" | "ubisoft" | "battlenet" | "rockstar" | "xbox" | "pc";
 
 export interface Game {
   id: number;
@@ -24,6 +27,13 @@ export interface Game {
   cover_zoom: number;
   cover_x: number;
   cover_y: number;
+  kind: Kind;
+  /** User category (free text). */
+  collection: string;
+  /** Store / launcher guessed from the install path. */
+  platform: Platform;
+  /** Manual order (drag & drop). */
+  sort_order: number;
 }
 
 export interface GameInput {
@@ -37,12 +47,14 @@ export interface GameInput {
   cover_zoom: number;
   cover_x: number;
   cover_y: number;
+  kind: Kind;
+  collection: string;
 }
 
 /** Editable payload of an existing game. */
 export function toInput(g: Game, patch: Partial<GameInput> = {}): GameInput {
-  const { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y } = g;
-  return { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y, ...patch };
+  const { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y, kind, collection } = g;
+  return { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y, kind, collection, ...patch };
 }
 
 export interface ScannedExe {
@@ -106,6 +118,8 @@ export interface Settings {
   search_paths: string[];
   start_view: StartView;
   launch_at_startup: boolean;
+  /** Friends & presence on the local network (opt-in). */
+  social_enabled: boolean;
 }
 
 /** A game found on disk by the read-only detector. */
@@ -115,6 +129,7 @@ export interface Detected {
   executable_path: string;
   install_dir: string;
   source: "steam" | "epic" | "gog" | "folder";
+  kind: Kind;
 }
 
 export type DetectionAction = "add" | "ignore" | "later";
@@ -131,6 +146,77 @@ export interface UpdateProgress {
   total: number | null;
 }
 
+export interface UninstallPlan {
+  via: "steam" | "registry" | "inno";
+  detail: string;
+}
+
+export interface UninstallFinished {
+  game_id: number;
+  title: string;
+  removed: boolean;
+}
+
+/** An image + its framing (zoom around a focal point, in %). */
+export interface ImageFrame {
+  url: string;
+  zoom: number;
+  x: number;
+  y: number;
+}
+
+export interface Profile {
+  id: string;
+  name: string;
+  bio: string;
+  avatar: ImageFrame;
+  banner: ImageFrame;
+  /** Framed renders (data URLs) shared with friends. */
+  avatar_thumb: string;
+  banner_thumb: string;
+  /** Pinned games (ids), in order. */
+  showcase: number[];
+}
+
+export type Presence = "offline" | "online" | "ingame";
+
+export interface PeerView {
+  id: string;
+  code: string;
+  name: string;
+  status: Presence;
+  game: string;
+}
+
+export interface FriendView {
+  id: string;
+  code: string;
+  name: string;
+  avatar: string;
+  state: "friend" | "incoming" | "outgoing";
+  status: Presence;
+  game: string;
+}
+
+export interface SocialState {
+  enabled: boolean;
+  error: string | null;
+  me: { id: string; code: string; name: string };
+  peers: PeerView[];
+  friends: FriendView[];
+}
+
+export interface PublicProfile {
+  id: string;
+  name: string;
+  bio: string;
+  avatar: string;
+  banner: string;
+  status: Presence;
+  game: string;
+  showcase: { title: string; playtime_minutes: number; cover: string }[];
+}
+
 export interface CacheReport {
   files_removed: number;
   bytes_freed: number;
@@ -142,6 +228,18 @@ const tauriApi = {
   fillMissingCovers: () => invoke<Game[]>("fill_missing_covers"),
   updateGame: (id: number, input: GameInput) => invoke<Game>("update_game", { id, input }),
   deleteGame: (id: number) => invoke<void>("delete_game", { id }),
+  reorderGames: (ids: number[]) => invoke<void>("reorder_games", { ids }),
+  uninstallInfo: (id: number) => invoke<UninstallPlan | null>("uninstall_info", { id }),
+  uninstallGame: (id: number) => invoke<void>("uninstall_game", { id }),
+  uninstallingGames: () => invoke<number[]>("uninstalling_games"),
+  getProfile: () => invoke<Profile>("get_profile"),
+  saveProfile: (profile: Profile) => invoke<Profile>("save_profile", { profile }),
+  imageDataUrl: (path: string) => invoke<string>("image_data_url", { path }),
+  socialState: () => invoke<SocialState>("social_state"),
+  addFriend: (id: string) => invoke<"friend" | "outgoing">("add_friend", { id }),
+  answerFriend: (id: string, accept: boolean) => invoke<void>("answer_friend", { id, accept }),
+  removeFriend: (id: string) => invoke<void>("remove_friend", { id }),
+  friendProfile: (id: string) => invoke<PublicProfile>("friend_profile", { id }),
   launchGame: (id: number) => invoke<RunningGame>("launch_game", { id }),
   runningGames: () => invoke<RunningGame[]>("running_games"),
   openFolder: (path: string) => invoke<void>("open_folder", { path }),
@@ -175,6 +273,9 @@ const tauriEvents = {
     listen<GameStopped>("game-stopped", (e) => cb(e.payload)),
   onGamesDetected: (cb: (p: Detected[]) => void): Promise<UnlistenFn> =>
     listen<Detected[]>("games-detected", (e) => cb(e.payload)),
+  onGameUninstalled: (cb: (p: UninstallFinished) => void): Promise<UnlistenFn> =>
+    listen<UninstallFinished>("game-uninstalled", (e) => cb(e.payload)),
+  onSocialUpdated: (cb: () => void): Promise<UnlistenFn> => listen("social-updated", () => cb()),
   onUpdateProgress: (cb: (p: UpdateProgress) => void): Promise<UnlistenFn> =>
     listen<UpdateProgress>("update-progress", (e) => cb(e.payload)),
 };

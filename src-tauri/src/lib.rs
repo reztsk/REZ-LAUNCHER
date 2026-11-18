@@ -7,6 +7,9 @@ pub mod error;
 pub mod exe_info;
 pub mod launchers;
 pub mod settings;
+pub mod social;
+pub mod sysreg;
+pub mod uninstall;
 pub mod watcher;
 
 use std::sync::{Arc, Mutex};
@@ -44,13 +47,20 @@ pub fn run() {
                 eprintln!("[rez] recovered {recovered} interrupted session(s)");
             }
             commands::spawn_detection_loop(app.handle().clone(), db.clone());
+            let social_on = settings::Settings::load(&db).social_enabled;
             app.manage(AppState {
                 db,
                 tracker: Arc::new(Tracker::default()),
                 covers_dir: data_dir.join("covers"),
                 data_dir,
                 pending_update: Mutex::new(None),
+                social: Arc::new(social::Social::default()),
+                uninstalling: Arc::new(Mutex::new(Default::default())),
             });
+            if social_on {
+                let state = app.state::<AppState>();
+                commands::sync_social(app.handle(), &state, true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -59,6 +69,18 @@ pub fn run() {
             commands::fill_missing_covers,
             commands::update_game,
             commands::delete_game,
+            commands::reorder_games,
+            commands::uninstall_info,
+            commands::uninstall_game,
+            commands::uninstalling_games,
+            commands::get_profile,
+            commands::save_profile,
+            commands::image_data_url,
+            commands::social_state,
+            commands::add_friend,
+            commands::answer_friend,
+            commands::remove_friend,
+            commands::friend_profile,
             commands::launch_game,
             commands::running_games,
             commands::open_folder,

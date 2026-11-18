@@ -213,14 +213,12 @@ code {
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--grad);
-  box-shadow: 0 0 12px rgb(var(--acc-rgb) / 0.45);
 }
 .nav-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--acc-1);
-  box-shadow: 0 0 10px rgb(var(--acc-rgb) / 0.8);
 }
 
 /* ---------- Buttons ---------- */
@@ -255,14 +253,11 @@ code {
   background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
   border: 1px solid rgb(var(--acc-rgb) / 0.7);
   box-shadow:
-    0 6px 22px -8px rgb(var(--acc-rgb) / 0.4),
+    0 6px 18px -10px rgb(0 0 0 / 0.7),
     inset 0 -1px 0 rgb(0 0 0 / 0.12);
 }
 .btn-primary:hover {
   background: linear-gradient(180deg, var(--acc-1), var(--acc-1));
-  box-shadow:
-    0 8px 30px -8px rgb(var(--acc-rgb) / 0.6),
-    inset 0 -1px 0 rgb(0 0 0 / 0.12);
 }
 .btn-ghost {
   color: var(--text);
@@ -403,7 +398,6 @@ select.field option {
   bottom: 4px;
   border-radius: 10px;
   background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
-  box-shadow: 0 0 18px -6px rgb(var(--acc-rgb) / 0.6);
   transition:
     left 0.45s var(--ease-out-expo),
     width 0.45s var(--ease-out-expo);
@@ -420,8 +414,6 @@ select.field option {
 .card {
   --rx: 0deg;
   --ry: 0deg;
-  --mx: 50%;
-  --my: 50%;
   position: relative;
   animation: card-in 0.6s var(--ease-out-expo) both;
   animation-delay: calc(var(--i, 0) * 35ms);
@@ -452,8 +444,7 @@ select.field option {
   transform: perspective(900px) rotateX(var(--rx)) rotateY(var(--ry)) translateY(-6px) scale(1.025);
   box-shadow:
     0 26px 50px -16px rgb(0 0 0 / 0.95),
-    0 0 0 1px var(--metal-line),
-    0 0 36px -10px rgb(var(--acc-rgb) / 0.3);
+    0 0 0 1px var(--metal-line);
 }
 :root.no-tilt .card:hover .cover {
   transform: translateY(-4px);
@@ -476,19 +467,7 @@ select.field option {
 .card:hover .cover .gen {
   transform: scale(1.07);
 }
-.cover::after {
-  /* light sheen following the mouse */
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at var(--mx) var(--my), rgb(255 255 255 / 0.16), transparent 45%);
-  opacity: 0;
-  transition: opacity 0.4s;
-  pointer-events: none;
-}
-.card:hover .cover::after {
-  opacity: 1;
-}
+
 .cover .shade {
   position: absolute;
   inset: 0;
@@ -582,7 +561,6 @@ select.field option {
   color: var(--on-acc);
   border-color: transparent;
   background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
-  box-shadow: 0 0 18px -2px rgb(var(--acc-rgb) / 0.55);
 }
 .badge-live .dot {
   width: 7px;
@@ -609,7 +587,7 @@ select.field option {
 .card.is-running .cover {
   box-shadow:
     0 0 0 2px rgb(var(--acc-rgb) / 0.85),
-    0 0 46px -6px rgb(var(--acc-rgb) / 0.45);
+    0 18px 40px -18px rgb(0 0 0 / 0.9);
 }
 
 .playtime {
@@ -828,7 +806,6 @@ select.field option {
   color: var(--on-acc);
   border-color: transparent;
   background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
-  box-shadow: 0 0 16px -2px rgb(var(--acc-rgb) / 0.5);
 }
 .dots {
   display: flex;

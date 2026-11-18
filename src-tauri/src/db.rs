@@ -41,6 +41,31 @@ impl Category {
     }
 }
 
+/// Game or software/utility (overlays, wallpaper, benchmarks…): kept apart in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Game,
+    Software,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Game => "game",
+            Kind::Software => "software",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        if s == "software" {
+            Kind::Software
+        } else {
+            Kind::Game
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Game {
     pub id: i64,
@@ -64,6 +89,15 @@ pub struct Game {
     pub cover_zoom: f64,
     pub cover_x: f64,
     pub cover_y: f64,
+    /// Game or software/utility.
+    pub kind: Kind,
+    /// User category (free text, e.g. "FPS", "Coop"). Empty = none.
+    pub collection: String,
+    /// Detected store / launcher, computed from the install path at read time
+    /// ("steam", "epic", "gog", "ea", "ubisoft", "battlenet", "rockstar", "xbox", "pc").
+    pub platform: String,
+    /// Manual display order (drag & drop in the library).
+    pub sort_order: i64,
 }
 
 /// Payload used to create or update a game.
@@ -87,6 +121,10 @@ pub struct GameInput {
     pub cover_x: f64,
     #[serde(default = "default_center")]
     pub cover_y: f64,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default)]
+    pub collection: String,
 }
 
 fn default_zoom() -> f64 {
@@ -114,6 +152,12 @@ impl GameInput {
         self.cover_image_url = self.cover_image_url.trim().to_string();
         self.version = self.version.trim().to_string();
         self.description = self.description.trim().to_string();
+        self.collection = self.collection.trim().to_string();
+        if self.collection.chars().count() > 40 {
+            return Err(AppError::Invalid(
+                "Catégorie trop longue (40 caractères max).".into(),
+            ));
+        }
         self.cover_zoom = clamp_or(self.cover_zoom, 1.0, 4.0, 1.0);
         self.cover_x = clamp_or(self.cover_x, 0.0, 100.0, 50.0);
         self.cover_y = clamp_or(self.cover_y, 0.0, 100.0, 50.0);
@@ -171,17 +215,20 @@ const GAME_COLUMNS: &str = "id, title, executable_path, install_dir, cover_image
                             playtime_minutes, category, added_at, last_played_at, \
                             (SELECT COUNT(*) FROM sessions s WHERE s.game_id = games.id \
                              AND s.duration_seconds > 0) AS session_count, \
-                            description, cover_zoom, cover_x, cover_y";
+                            description, cover_zoom, cover_x, cover_y, kind, collection, sort_order";
 
 fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
     let category: String = row.get(7)?;
     let executable_path: String = row.get(2)?;
     let exe_missing = !executable_path.is_empty() && !Path::new(&executable_path).exists();
+    let install_dir: String = row.get(3)?;
+    let platform = crate::detect::platform_of(&install_dir, &executable_path).to_string();
+    let kind: String = row.get(15)?;
     Ok(Game {
         id: row.get(0)?,
         title: row.get(1)?,
         executable_path,
-        install_dir: row.get(3)?,
+        install_dir,
         cover_image_url: row.get(4)?,
         version: row.get(5)?,
         playtime_minutes: row.get(6)?,
@@ -194,6 +241,10 @@ fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
         cover_zoom: row.get(12)?,
         cover_x: row.get(13)?,
         cover_y: row.get(14)?,
+        kind: Kind::parse(&kind),
+        collection: row.get(16)?,
+        platform,
+        sort_order: row.get(17)?,
     })
 }
 
@@ -259,6 +310,15 @@ impl Database {
                  source          TEXT NOT NULL,
                  status          TEXT NOT NULL,
                  first_seen      TEXT NOT NULL
+             );
+
+             -- Friends (local network): 'friend' | 'incoming' | 'outgoing'.
+             CREATE TABLE IF NOT EXISTS friends (
+                 id        TEXT PRIMARY KEY,
+                 name      TEXT NOT NULL,
+                 state     TEXT NOT NULL,
+                 avatar    TEXT NOT NULL DEFAULT '',
+                 added_at  TEXT NOT NULL
              );",
         )?;
         // v0.3.0 columns (older databases are upgraded in place).
@@ -271,9 +331,25 @@ impl Database {
             ("cover_zoom", "REAL NOT NULL DEFAULT 1"),
             ("cover_x", "REAL NOT NULL DEFAULT 50"),
             ("cover_y", "REAL NOT NULL DEFAULT 50"),
+            // v0.4.0
+            ("kind", "TEXT NOT NULL DEFAULT 'game'"),
+            ("collection", "TEXT NOT NULL DEFAULT ''"),
+            ("sort_order", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !existing.iter().any(|c| c == col) {
                 conn.execute_batch(&format!("ALTER TABLE games ADD COLUMN {col} {ddl};"))?;
+            }
+        }
+        if !existing.is_empty() && !existing.iter().any(|c| c == "kind") {
+            // First run of v0.4.0: move utilities added earlier out of the games.
+            let rows: Vec<(i64, String, String)> = conn
+                .prepare("SELECT id, title, executable_path FROM games")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            for (id, title, exe) in rows {
+                if crate::detect::is_software(&title, &exe, None) {
+                    conn.execute("UPDATE games SET kind = 'software' WHERE id = ?1", [id])?;
+                }
             }
         }
         Ok(Self {
@@ -290,7 +366,7 @@ impl Database {
     pub fn list_games(&self) -> AppResult<Vec<Game>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {GAME_COLUMNS} FROM games ORDER BY title COLLATE NOCASE"
+            "SELECT {GAME_COLUMNS} FROM games ORDER BY sort_order, title COLLATE NOCASE"
         ))?;
         let games = stmt
             .query_map([], row_to_game)?
@@ -315,8 +391,10 @@ impl Database {
             let conn = self.conn();
             conn.execute(
                 "INSERT INTO games (title, executable_path, install_dir, cover_image_url, version, category,
-                                    added_at, description, cover_zoom, cover_x, cover_y)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                    added_at, description, cover_zoom, cover_x, cover_y, kind, collection,
+                                    sort_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM games))",
                 params![
                     g.title,
                     g.executable_path,
@@ -328,7 +406,9 @@ impl Database {
                     g.description,
                     g.cover_zoom,
                     g.cover_x,
-                    g.cover_y
+                    g.cover_y,
+                    g.kind.as_str(),
+                    g.collection
                 ],
             )?;
             conn.last_insert_rowid()
@@ -341,8 +421,9 @@ impl Database {
         let changed = self.conn().execute(
             "UPDATE games SET title = ?1, executable_path = ?2, install_dir = ?3,
                     cover_image_url = ?4, version = ?5, category = ?6,
-                    description = ?7, cover_zoom = ?8, cover_x = ?9, cover_y = ?10
-             WHERE id = ?11",
+                    description = ?7, cover_zoom = ?8, cover_x = ?9, cover_y = ?10,
+                    kind = ?11, collection = ?12
+             WHERE id = ?13",
             params![
                 g.title,
                 g.executable_path,
@@ -354,6 +435,8 @@ impl Database {
                 g.cover_zoom,
                 g.cover_x,
                 g.cover_y,
+                g.kind.as_str(),
+                g.collection,
                 id
             ],
         )?;
@@ -370,6 +453,24 @@ impl Database {
             "UPDATE games SET cover_image_url = ?1 WHERE id = ?2 AND cover_image_url = ''",
             params![url, id],
         )? > 0)
+    }
+
+    /// Save the manual order: `ids[0]` first. Games not listed keep their place after.
+    pub fn reorder_games(&self, ids: &[i64]) -> AppResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE games SET sort_order = sort_order + ?1",
+            [ids.len() as i64 + 1],
+        )?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE games SET sort_order = ?1 WHERE id = ?2",
+                params![i as i64 + 1, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_game(&self, id: i64) -> AppResult<()> {
@@ -582,6 +683,63 @@ impl Database {
         )?)
     }
 
+    // -------------------------------------------------------------- friends
+
+    pub fn list_friends(&self) -> AppResult<Vec<Friend>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, state, avatar, added_at FROM friends ORDER BY name COLLATE NOCASE",
+        )?;
+        let v = stmt
+            .query_map([], |r| {
+                Ok(Friend {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    state: r.get(2)?,
+                    avatar: r.get(3)?,
+                    added_at: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    pub fn friend_state(&self, id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT state FROM friends WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// Insert or update a friend entry (name / avatar refreshed, state set).
+    pub fn upsert_friend(&self, id: &str, name: &str, avatar: &str, state: &str) -> AppResult<()> {
+        self.conn().execute(
+            "INSERT INTO friends (id, name, state, avatar, added_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, state = excluded.state,
+                 avatar = CASE WHEN excluded.avatar <> '' THEN excluded.avatar ELSE friends.avatar END",
+            params![id, name, state, avatar, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Refresh the name/avatar of a known friend (never creates one).
+    pub fn refresh_friend(&self, id: &str, name: &str, avatar: &str) -> AppResult<()> {
+        self.conn().execute(
+            "UPDATE friends SET name = ?2,
+                 avatar = CASE WHEN ?3 <> '' THEN ?3 ELSE avatar END WHERE id = ?1",
+            params![id, name, avatar],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_friend(&self, id: &str) -> AppResult<()> {
+        self.conn()
+            .execute("DELETE FROM friends WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Every local cover path still referenced by a game.
     pub fn cover_paths(&self) -> AppResult<Vec<String>> {
         let conn = self.conn();
@@ -594,6 +752,18 @@ impl Database {
     }
 }
 
+/// Someone added through the local network (see `social.rs`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Friend {
+    pub id: String,
+    pub name: String,
+    /// "friend" | "incoming" (they asked) | "outgoing" (we asked)
+    pub state: String,
+    /// Small avatar (data URL) last received from them.
+    pub avatar: String,
+    pub added_at: String,
+}
+
 /// A game found on disk by the detector (see `detect.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Detected {
@@ -604,6 +774,9 @@ pub struct Detected {
     pub install_dir: String,
     /// "steam" | "epic" | "gog" | "folder"
     pub source: String,
+    /// Game or software/utility (computed by the detector, not stored).
+    #[serde(default)]
+    pub kind: Kind,
 }
 
 fn row_to_detected(r: &Row<'_>) -> rusqlite::Result<Detected> {
@@ -613,6 +786,13 @@ fn row_to_detected(r: &Row<'_>) -> rusqlite::Result<Detected> {
         executable_path: r.get(2)?,
         install_dir: r.get(3)?,
         source: r.get(4)?,
+        kind: Kind::Game,
+    })
+    .map(|mut d| {
+        if crate::detect::is_software(&d.title, &d.executable_path, None) {
+            d.kind = Kind::Software;
+        }
+        d
     })
 }
 
@@ -665,7 +845,53 @@ mod tests {
             cover_zoom: 1.0,
             cover_x: 50.0,
             cover_y: 50.0,
+            kind: Kind::Game,
+            collection: String::new(),
         }
+    }
+
+    #[test]
+    fn manual_order_kind_and_collection() {
+        let db = Database::open_in_memory().unwrap();
+        let a = db
+            .insert_game(input("Alpha", r"D:\J\a\a.exe", Category::Installed))
+            .unwrap();
+        let b = db
+            .insert_game(input("Bravo", r"D:\J\b\b.exe", Category::Installed))
+            .unwrap();
+        let mut ci = input("Crosshair X", r"D:\J\c\c.exe", Category::Installed);
+        ci.kind = Kind::Software;
+        ci.collection = "  Outils ".into();
+        let c = db.insert_game(ci).unwrap();
+        assert_eq!((c.kind, c.collection.as_str()), (Kind::Software, "Outils"));
+        assert!(a.sort_order < b.sort_order && b.sort_order < c.sort_order);
+        db.reorder_games(&[c.id, a.id]).unwrap();
+        let titles: Vec<_> = db
+            .list_games()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.title)
+            .collect();
+        assert_eq!(titles, vec!["Crosshair X", "Alpha", "Bravo"]);
+        let mut long = input("X", r"D:\J\x.exe", Category::Installed);
+        long.collection = "x".repeat(41);
+        assert!(db.insert_game(long).is_err());
+    }
+
+    #[test]
+    fn friends_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_friend("abc", "Rez", "data:image/png;base64,AA", "outgoing")
+            .unwrap();
+        assert_eq!(db.friend_state("abc").unwrap().as_deref(), Some("outgoing"));
+        db.upsert_friend("abc", "Rez2", "", "friend").unwrap();
+        let f = &db.list_friends().unwrap()[0];
+        assert_eq!((f.name.as_str(), f.state.as_str()), ("Rez2", "friend"));
+        assert_eq!(f.avatar, "data:image/png;base64,AA");
+        db.refresh_friend("zzz", "Ghost", "").unwrap();
+        assert_eq!(db.list_friends().unwrap().len(), 1);
+        db.remove_friend("abc").unwrap();
+        assert!(db.list_friends().unwrap().is_empty());
     }
 
     #[test]
@@ -699,7 +925,8 @@ mod tests {
                    cover_image_url TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '',
                    playtime_minutes INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT 'installed',
                    added_at TEXT NOT NULL, last_played_at TEXT);
-                 INSERT INTO games (title, added_at, category) VALUES ('Legacy', '2025-01-01T00:00:00Z', 'not_installed');",
+                 INSERT INTO games (title, added_at, category) VALUES ('Legacy', '2025-01-01T00:00:00Z', 'not_installed');
+                 INSERT INTO games (title, added_at, category) VALUES ('Wallpaper Engine', '2025-01-02T00:00:00Z', 'not_installed');",
             )
             .unwrap();
         }
@@ -708,6 +935,9 @@ mod tests {
         assert_eq!(g.title, "Legacy");
         assert_eq!((g.cover_zoom, g.cover_x, g.cover_y), (1.0, 50.0, 50.0));
         assert_eq!(g.description, "");
+        assert_eq!(g.kind, Kind::Game);
+        let all = db.list_games().unwrap();
+        assert_eq!(all[1].kind, Kind::Software);
     }
 
     #[test]
@@ -730,7 +960,7 @@ mod tests {
 
         let all = db.list_games().unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].title, "Alpha"); // sorted by title
+        assert_eq!(all[0].title, "Zelda-like"); // manual order: insertion order
 
         let mut upd = input("Hero", r"D:\Jeux\Hero\hero.exe", Category::Installed);
         upd.version = "2.1.0".into();
@@ -830,6 +1060,7 @@ mod tests {
             executable_path: format!(r"D:\Jeux\{k}\{k}.exe"),
             install_dir: format!(r"D:\Jeux\{k}"),
             source: "folder".into(),
+            kind: Default::default(),
         };
         db.insert_detections(&[d("a"), d("b")], "pending").unwrap();
         db.set_detection_status(&["a".into()], "ignored").unwrap();

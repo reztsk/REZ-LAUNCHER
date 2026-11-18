@@ -80,6 +80,9 @@ pub struct Settings {
     pub start_view: StartView,
     /// Mirrors the OS autostart entry (source of truth: the OS).
     pub launch_at_startup: bool,
+    // Friends
+    /// Presence + profiles on the local network (opt-in).
+    pub social_enabled: bool,
 }
 
 impl Default for Settings {
@@ -100,6 +103,7 @@ impl Default for Settings {
             search_paths: Vec::new(),
             start_view: StartView::Library,
             launch_at_startup: false,
+            social_enabled: false,
         }
     }
 }

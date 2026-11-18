@@ -50,7 +50,7 @@ function render(list: Detected[], ctx: DetectionCtx): void {
       <label class="det-row">
         <input type="checkbox" class="check" data-key="${esc(d.key)}" checked ${single ? "hidden" : ""} />
         <div class="min-w-0">
-          <p class="truncate text-sm font-semibold">${esc(d.title)}</p>
+          <p class="truncate text-sm font-semibold">${esc(d.title)}${d.kind === "software" ? ` <span class="badge ml-1 align-middle" title="Rangé dans l’onglet « Logiciels »">Logiciel</span>` : ""}</p>
           <p class="truncate text-xs text-muted" title="${esc(d.executable_path)}">${esc(d.executable_path)}</p>
         </div>
         <span class="badge shrink-0 !normal-case !tracking-normal">${logo}${SOURCE_LABEL[d.source]}</span>

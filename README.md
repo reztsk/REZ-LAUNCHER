@@ -32,18 +32,24 @@ REZ launcher est **strictement** un lanceur de raccourcis et un chronomètre :
 | Lire la liste des processus (comme le Gestionnaire des tâches) | Écrire, modifier, déplacer ou supprimer un fichier de jeu, de dossier d'installation ou de launcher |
 | Lire le nom et la version d'un `.exe` (comme Explorer › Propriétés) | Contourner un DRM ou un anti-cheat |
 | Lire la liste des fenêtres ouvertes (comme Alt+Tab) pour savoir quand le jeu s'affiche | Ouvrir un handle sur le processus d'un jeu |
-| Lire (sans les modifier) les manifestes d'installation Steam / Epic / GOG | Lancer un jeu par un autre moyen qu'un raccourci |
+| Lire (sans les modifier) les manifestes d'installation Steam / Epic / GOG et le registre Windows | Lancer un jeu par un autre moyen qu'un raccourci |
+| **Désinstaller** : lancer le désinstallateur **officiel** du jeu, à ta demande | Supprimer lui-même des fichiers de jeu |
 
 Supprimer un jeu de REZ launcher retire uniquement sa fiche : les fichiers sur le disque ne sont pas touchés.
+**Désinstaller** lance le désinstallateur que le jeu a lui-même enregistré dans Windows (ou la fenêtre de désinstallation de Steam) : c'est lui qui supprime les fichiers, REZ launcher attend la fin puis retire la fiche.
 
 ## Fonctionnalités
 
-- **Bibliothèque** : grille de jaquettes animée (glassmorphism noir & gris, tilt 3D), filtres **Tous / Installés / Non installés / Launchers**, recherche (`Ctrl+F`) et tri.
+- **Bibliothèque** : grille de jaquettes (noir & gris, tilt 3D), onglets **Tous / Installés / Non installés / Launchers / Logiciels**, recherche (`Ctrl+F`), tri (dont **« Mon ordre »** par glisser-déposer) et regroupement **par plateforme** ou **par catégorie**.
+- **Jeux ≠ logiciels** : overlays, fonds d'écran animés, outils de benchmark ou de capture (Wallpaper Engine, Crosshair X, Lossless Scaling, MSI Afterburner…) sont reconnus et rangés dans **Logiciels**.
+- **Désinstaller** un jeu depuis son menu d'options, via son désinstallateur officiel.
+- **Profil** : photo, bannière, bio, code ami et **vitrine** de 6 jeux en boîtes 3D.
+- **Amis** (réseau local, opt-in) : statut en ligne / en jeu / hors ligne en direct, demandes d'ami par code, profils et vitrines des amis. Pair-à-pair : pas de compte, pas de serveur, rien ne sort de ton réseau.
 - **Temps par jeu** sous chaque jaquette, et dans son menu **Options** : temps total sur ce jeu, nombre de sessions, moyenne par session, dernière session, version, **Ouvrir l'emplacement**, modifier, supprimer.
 - **Import** d'un jeu via son `.exe` (sélecteur natif ou **glisser-déposer**) : titre et version lus automatiquement.
 - **Détection des nouveaux jeux** (voir plus bas) avec pop-up « Veux-tu l'ajouter à la bibliothèque REZ launcher ? ».
-- **Launchers** : détection de Steam, Epic Games, Battle.net, Ubisoft Connect, GOG Galaxy, EA app, avec leurs logos ; bouton **Télécharger** (site officiel uniquement, URLs en liste blanche côté Rust) ; **guide interactif en carrousel** propre à chaque launcher.
-- **Affichage** au choix (*Paramètres*) : **Grille**, **Boîte 3D** (clic sur un jeu = sa boîte 3D interactive) ou **Carrousel 3D**.
+- **Launchers** : détection de Steam, Epic Games, Battle.net, Ubisoft Connect, GOG Galaxy, EA app et Rockstar Games (registre Windows, entrées « Applications », dossiers usuels et AppData), avec leurs logos ; bouton **Télécharger** (site officiel uniquement, URLs en liste blanche côté Rust) ; **guide interactif en carrousel** propre à chaque launcher.
+- **Affichage** au choix (*Paramètres*) : **Grille**, **Boîte 3D** (étagère de boîtes 3D ; clic = boîte interactive) ou **Carrousel 3D**.
 - **Éditeur de jaquette** : image locale ou URL, glisser pour déplacer, molette/curseur pour zoomer, centrer, réinitialiser ; aperçu en 3D en direct. Seul le cadrage est enregistré : l'image d'origine reste intacte.
 - **Paramètres** : thème, mode d'affichage, effet verre, taille des jaquettes, animations, effet 3D, fond animé ; animation de lancement, réduction pendant le jeu, réaffichage à la fermeture ; mises à jour ; dossiers de recherche ; lancement avec Windows ; onglet d'ouverture ; vidage du cache.
 
@@ -67,7 +73,20 @@ Toutes les 90 s (désactivable dans *Paramètres*), en **lecture seule** :
 - **GOG Galaxy** : registre `HKLM\SOFTWARE\WOW6432Node\GOG.com\Games` ;
 - **Tes dossiers** (par défaut `X:\Jeux` et `X:\Games` s'ils existent) : un sous-dossier = un jeu, l'exécutable principal est choisi par heuristique (installateurs, redistribuables, crash reporters exclus).
 
+Les logiciels (overlays, outils…) sont reconnus par leur nom, leur exécutable ou leur identifiant Steam, et rangés dans **Logiciels**. La **plateforme** (Steam, Epic, EA…) est déduite du dossier d'installation.
+
 Un jeu repéré déclenche une pop-up. « Oui » crée une fiche dans la bibliothèque (un raccourci interne), « Non » ne le propose plus (réactivable dans *Paramètres*).
+
+### Comment fonctionnent les amis
+
+Désactivé par défaut (onglet **Amis**). Une fois activé :
+
+- toutes les 4 s, REZ launcher annonce sur le réseau local (UDP `47777`, broadcast) un petit paquet : ton id, ton pseudo, ton statut (en ligne / en jeu + titre du jeu) ;
+- les profils, vitrines et demandes d'ami passent par une courte requête JSON directe (TCP `47778`), limitée en taille et validée à la réception (texte nettoyé, images JPEG/PNG/WebP en data URL uniquement, URLs `https` uniquement) ;
+- une demande d'ami n'est acceptée que si elle vient de l'adresse qui annonce cet id sur le réseau ;
+- Windows peut demander d'autoriser REZ launcher dans le pare-feu : choisis « Réseaux privés ».
+
+Ça fonctionne entre PC du **même réseau** (même box, même Wi-Fi). Il n'y a pas de serveur central : des amis sur Internet ne sont pas visibles.
 
 ## Installation
 
@@ -118,10 +137,14 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 │  └─ release-assets.mjs    Fichiers de release + manifeste de mise à jour (CI)
 ├─ src/                     Frontend TypeScript + Tailwind
 │  ├─ main.ts               Vues Bibliothèque / Launchers, formulaire, événements
+│  ├─ profile-view.ts       Profil, vitrine, photo et bannière
+│  ├─ friends-view.ts       Amis (réseau local), profils des amis
+│  ├─ reorder.ts            Glisser-déposer « Mon ordre »
+│  ├─ thumbs.ts             Miniatures cadrées (photo / bannière partagées)
 │  ├─ settings-view.ts      Onglet Paramètres
 │  ├─ box3d.ts              Boîte de jeu 3D (face, tranche, dos) + visionneuse
 │  ├─ carousel.ts           Mode « Carrousel 3D »
-│  ├─ cover-editor.ts       Éditeur de jaquette (import, déplacer, zoomer, centrer)
+│  ├─ cover-editor.ts       Éditeur d'image : jaquette, photo de profil, bannière
 │  ├─ launch-overlay.ts     Animation de lancement
 │  ├─ covers.ts / fx-math.ts  Rendu des jaquettes, maths des vues 3D
 │  ├─ themes.ts / fx.css    Thèmes, effet verre, styles 3D
@@ -141,7 +164,10 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
       ├─ detect.rs          Détection des jeux installés (lecture seule)
       ├─ settings.rs        Préférences utilisateur
       ├─ exe_info.rs        Lecture nom/version d'un .exe (API Windows, lecture seule)
-      ├─ launchers.rs       Launchers connus, URLs officielles, détection
+      ├─ launchers.rs       Launchers connus, URLs officielles, détection (registre + dossiers)
+      ├─ sysreg.rs          Lecture seule du registre (entrées « Applications »)
+      ├─ uninstall.rs       Désinstallateur officiel : recherche, lancement, attente
+      ├─ social.rs          Profil + amis en pair-à-pair sur le réseau local
       └─ commands.rs        Commandes Tauri exposées au frontend
 ```
 
@@ -151,6 +177,10 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 | --- | --- |
 | `list_games`, `add_game`, `update_game`, `delete_game` | CRUD bibliothèque |
 | `fill_missing_covers` | Jaquettes officielles Steam pour les jeux qui n'en ont pas |
+| `reorder_games(ids)` | Ordre manuel (glisser-déposer) |
+| `uninstall_info(id)`, `uninstall_game(id)`, `uninstalling_games` | Désinstallateur officiel d'un jeu |
+| `get_profile`, `save_profile`, `image_data_url(path)` | Profil, photo, bannière, vitrine |
+| `social_state`, `add_friend`, `answer_friend`, `remove_friend`, `friend_profile` | Amis sur le réseau local |
 | `launch_game(id)` | Lance le jeu et démarre son chrono |
 | `running_games` | Sessions en cours |
 | `open_folder(path)` | Ouvre l'explorateur Windows sur le dossier |
@@ -163,15 +193,16 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 | `check_update`, `install_update` | Mise à jour automatique |
 | `clear_cache`, `open_data_dir`, `open_repo` | Données |
 
-Événements : `game-started`, `game-ready` (`{ game_id, window }`), `game-stopped` (`{ game, session_seconds }`), `games-detected`, `update-progress`.
+Événements : `game-started`, `game-ready` (`{ game_id, window }`), `game-stopped` (`{ game, session_seconds }`), `game-uninstalled` (`{ game_id, title, removed }`), `games-detected`, `social-updated`, `update-progress`.
 
 ### Données
 
 Base SQLite dans `%APPDATA%\io.github.rezlauncher\rez-launcher.sqlite3` :
 
-- `games` : `id, title, executable_path, install_dir, cover_image_url, version, playtime_minutes, category ('installed' | 'not_installed' | 'launcher'), added_at, last_played_at, description, cover_zoom, cover_x, cover_y`
+- `games` : `id, title, executable_path, install_dir, cover_image_url, version, playtime_minutes, category ('installed' | 'not_installed' | 'launcher'), added_at, last_played_at, description, cover_zoom, cover_x, cover_y, kind ('game' | 'software'), collection, sort_order`
 - `sessions` : `id, game_id, started_at, ended_at, duration_seconds, active`
-- `settings` : préférences (JSON)
+- `settings` : préférences et profil (JSON)
+- `friends` : `id, name, state ('friend' | 'incoming' | 'outgoing'), avatar, added_at`
 - `detections` : jeux repérés sur le disque et réponse de l'utilisateur (`pending`, `seen`, `ignored`, `added`)
 
 ## Contribuer

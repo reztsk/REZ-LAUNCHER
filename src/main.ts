@@ -1,8 +1,11 @@
 import "./styles.css";
 import "./fx.css";
 import { api, events, coverSrc, isTauri, installMock, toInput } from "./api";
-import type { Category, Detected, DriveInfo, Game, GameInput, LauncherInfo, RunningGame, ScannedExe, Settings } from "./api";
-import { openGameBox } from "./box3d";
+import type { Category, Detected, DriveInfo, Game, GameInput, Kind, LauncherInfo, Platform, Profile, RunningGame, ScannedExe, Settings, SocialState } from "./api";
+import { boxHtml, openGameBox } from "./box3d";
+import { disableReorder, enableReorder } from "./reorder";
+import { renderFriends } from "./friends-view";
+import { avatarHtml, renderProfile, SHOWCASE_MAX, type ProfileCtx } from "./profile-view";
 import { mountCarousel } from "./carousel";
 import { openCoverEditor } from "./cover-editor";
 import { coverHtml, generatedCover, type CoverLike } from "./covers";
@@ -17,9 +20,11 @@ import { confirmModal, errorToast, openModal, toast } from "./ui";
 import { checkForUpdates, onUpdateStatus } from "./updates";
 import { showLaunch, type LaunchHandle } from "./launch-overlay";
 
-type View = "library" | "launchers" | "settings";
-type Filter = "all" | Category;
-type Sort = "title" | "playtime" | "recent";
+type View = "library" | "launchers" | "settings" | "profile" | "friends";
+/** "all" = every game (software and launchers have their own tabs). */
+type Filter = "all" | Category | "software";
+type Sort = "custom" | "title" | "playtime" | "recent";
+type Group = "none" | "platform" | "collection";
 
 const LS_KEY = "rez.ui.v1";
 
@@ -29,10 +34,11 @@ interface Persisted {
   drive: string | null;
   guideDone: Record<string, number[]>;
   carouselId: number | null;
+  group: Group;
 }
 
 function loadPersisted(): Persisted {
-  const fallback: Persisted = { filter: "all", sort: "recent", drive: null, guideDone: {}, carouselId: null };
+  const fallback: Persisted = { filter: "all", sort: "recent", drive: null, guideDone: {}, carouselId: null, group: "none" };
   try {
     return { ...fallback, ...JSON.parse(localStorage.getItem(LS_KEY) ?? "{}") };
   } catch {
@@ -56,6 +62,7 @@ const DEFAULT_SETTINGS: Settings = {
   search_paths: [],
   start_view: "library",
   launch_at_startup: false,
+  social_enabled: false,
 };
 
 const persisted = loadPersisted();
@@ -80,6 +87,11 @@ const state = {
   carouselIntro: true,
   /** Launch animations in progress, by game id. */
   launches: new Map<number, LaunchHandle>(),
+  group: persisted.group,
+  profile: null as Profile | null,
+  social: null as SocialState | null,
+  /** Official uninstallers running, by game id. */
+  uninstalling: new Set<number>(),
 };
 
 function persist(): void {
@@ -92,6 +104,7 @@ function persist(): void {
         drive: state.drive,
         guideDone: state.guideDone,
         carouselId: state.carouselId,
+        group: state.group,
       }),
     );
   } catch {
@@ -107,6 +120,25 @@ const CATEGORY_LABEL: Record<Category, string> = {
   not_installed: "Non installé",
   launcher: "Launcher",
 };
+
+const PLATFORM_LABEL: Record<Platform, string> = {
+  steam: "Steam",
+  epic: "Epic Games",
+  gog: "GOG",
+  ea: "EA app",
+  ubisoft: "Ubisoft Connect",
+  battlenet: "Battle.net",
+  rockstar: "Rockstar Games",
+  xbox: "Xbox",
+  pc: "Autres jeux PC",
+};
+
+/** Games tab ("Tous" and its siblings) never shows software. */
+function inFilter(g: Game, f: Filter): boolean {
+  if (f === "software") return g.kind === "software";
+  if (g.kind === "software") return false;
+  return f === "all" ? g.category !== "launcher" : g.category === f;
+}
 
 function withTransition(fn: () => void): void {
   type VT = { ready: Promise<void>; finished: Promise<void> };
@@ -160,8 +192,11 @@ function renderShell(): void {
         </div>
       </div>
 
-      <nav class="mt-9 flex flex-col gap-1 px-[14px]">
+      <button id="me-chip" class="me-chip mx-1 mt-7" data-nav="profile" title="Ton profil"></button>
+
+      <nav class="mt-5 flex flex-col gap-1 px-[14px]">
         <button class="nav-btn" data-nav="library">${icon.grid}<span class="flex-1 text-left">Bibliothèque</span><span id="nav-count" class="text-xs text-muted"></span></button>
+        <button class="nav-btn" data-nav="friends">${icon.users}<span class="flex-1 text-left">Amis</span><span id="nav-friends" class="nav-pill hidden"></span></button>
         <button class="nav-btn" data-nav="launchers">${icon.rocket}<span class="flex-1 text-left">Launchers</span></button>
         <button class="nav-btn" data-nav="settings">${icon.settings}<span class="flex-1 text-left">Paramètres</span><i id="nav-update" class="nav-dot hidden" title="Mise à jour disponible"></i></button>
       </nav>
@@ -189,7 +224,24 @@ function renderSidebar(): void {
     if (b.dataset.nav === state.view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
-  $("#nav-count")!.textContent = String(state.games.filter((g) => g.category !== "launcher").length);
+  $("#nav-count")!.textContent = String(state.games.filter((g) => inFilter(g, "all")).length);
+  const st = state.social;
+  const online = st?.friends.filter((f) => f.state === "friend" && f.status !== "offline").length ?? 0;
+  const requests = st?.friends.filter((f) => f.state === "incoming").length ?? 0;
+  const pill = $("#nav-friends")!;
+  pill.classList.toggle("hidden", !(online || requests));
+  pill.classList.toggle("alert", requests > 0);
+  pill.textContent = requests ? String(requests) : String(online);
+  pill.title = requests ? `${requests} demande(s) d'ami` : `${online} ami(s) en ligne`;
+  const p = state.profile;
+  const playing = [...state.running.values()].map((r) => state.games.find((g) => g.id === r.game_id)).find(Boolean);
+  $("#me-chip")!.innerHTML = p
+    ? `<span class="relative shrink-0">${avatarHtml(p, "sm")}<i class="presence ${playing ? "ingame" : st?.enabled ? "online" : "offline"}"></i></span>
+       <span class="min-w-0 flex-1 text-left"><b class="block truncate text-sm">${esc(p.name)}</b>
+       <small class="block truncate text-[11px] text-muted">${playing ? `En jeu · ${esc(playing.title)}` : st?.enabled ? "En ligne" : "Voir mon profil"}</small></span>`
+    : "";
+  if (state.view === "profile") $("#me-chip")!.setAttribute("aria-current", "page");
+  else $("#me-chip")!.removeAttribute("aria-current");
   $("#nav-update")!.classList.toggle("hidden", !state.updateAvailable);
   const live = [...state.running.values()]
     .map((r) => ({ r, g: state.games.find((g) => g.id === r.game_id) }))
@@ -214,6 +266,8 @@ function renderSidebar(): void {
 function renderView(): void {
   if (state.view === "library") renderLibrary();
   else if (state.view === "launchers") renderLaunchers();
+  else if (state.view === "profile") renderProfileView();
+  else if (state.view === "friends") renderFriendsView();
   else renderSettingsView();
 }
 
@@ -230,11 +284,11 @@ function switchView(view: View): void {
 
 function visibleGames(): Game[] {
   const q = state.search.trim().toLowerCase();
-  const list = state.games.filter(
-    (g) => (state.filter === "all" || g.category === state.filter) && (!q || g.title.toLowerCase().includes(q)),
-  );
+  const list = state.games.filter((g) => inFilter(g, state.filter) && (!q || g.title.toLowerCase().includes(q)));
   const byTitle = (a: Game, b: Game) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" });
   switch (state.sort) {
+    case "custom":
+      return list.sort((a, b) => a.sort_order - b.sort_order || byTitle(a, b));
     case "playtime":
       return list.sort((a, b) => b.playtime_minutes - a.playtime_minutes || byTitle(a, b));
     case "recent":
@@ -263,7 +317,13 @@ function renderLibrary(): void {
             <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted">${icon.search}</span>
             <input id="search" class="field w-64 !pl-10" placeholder="Rechercher…  (Ctrl+F)" value="${esc(state.search)}" spellcheck="false" />
           </label>
+          <select id="group" class="field !w-auto pr-8" title="Grouper par">
+            <option value="none">Sans groupe</option>
+            <option value="platform">Par plateforme</option>
+            <option value="collection">Par catégorie</option>
+          </select>
           <select id="sort" class="field !w-auto pr-8" title="Trier">
+            <option value="custom">Mon ordre</option>
             <option value="recent">Récents</option>
             <option value="playtime">Temps de jeu</option>
             <option value="title">A → Z</option>
@@ -276,10 +336,17 @@ function renderLibrary(): void {
         <div id="tabs" class="tabs liquid" role="tablist"></div>
         <p id="result-count" class="text-xs text-muted"></p>
       </div>
+      <p id="order-hint" class="order-hint mt-3 hidden">${icon.grip}Glisse les jeux pour les réordonner. L'ordre est enregistré.</p>
       <section id="grid" class="${state.settings.library_view === "carousel" ? "mt-4" : "grid-games mt-6"}"></section>
     </div>`;
 
   $<HTMLSelectElement>("#sort")!.value = state.sort;
+  $<HTMLSelectElement>("#group")!.value = state.group;
+  $<HTMLSelectElement>("#group")!.addEventListener("change", (e) => {
+    state.group = (e.target as HTMLSelectElement).value as Group;
+    persist();
+    updateLibrary(true);
+  });
   $<HTMLInputElement>("#search")!.addEventListener("input", (e) => {
     state.search = (e.target as HTMLInputElement).value;
     updateLibrary(false);
@@ -315,12 +382,13 @@ function updateLibrary(animate: boolean): void {
 
 function renderTabs(): void {
   const tabs = $("#tabs")!;
-  const count = (f: Filter) => (f === "all" ? state.games.length : state.games.filter((g) => g.category === f).length);
+  const count = (f: Filter) => state.games.filter((g) => inFilter(g, f)).length;
   const items: [Filter, string][] = [
     ["all", "Tous"],
     ["installed", "Installés"],
     ["not_installed", "Non installés"],
     ["launcher", "Launchers"],
+    ["software", "Logiciels"],
   ];
   const prev = $<HTMLElement>(".tab-indicator", tabs);
   const prevBox = prev ? { left: prev.style.left, width: prev.style.width } : null;
@@ -371,7 +439,8 @@ function cardHtml(g: Game, i: number): string {
   const isOpen = state.open.has(g.id);
   const enter = !state.seen.has(g.id);
   const badges: string[] = [];
-  if (running) badges.push(`<span class="badge badge-live"><i class="dot"></i>En cours</span>`);
+  if (state.uninstalling.has(g.id)) badges.push(`<span class="badge badge-warn">Désinstallation…</span>`);
+  else if (running) badges.push(`<span class="badge badge-live"><i class="dot"></i>En cours</span>`);
   else if (g.category !== "installed") badges.push(`<span class="badge">${CATEGORY_LABEL[g.category]}</span>`);
   if (g.exe_missing) badges.push(`<span class="badge badge-warn" title="${esc(g.executable_path)}">Exe introuvable</span>`);
   const dir = g.install_dir || g.executable_path;
@@ -383,11 +452,14 @@ function cardHtml(g: Game, i: number): string {
   const boxMode = state.settings.library_view === "box3d";
   const coverAction = boxMode ? "box" : canPlay(g) ? "play" : "toggle";
   const coverTitle = boxMode ? "Voir la boîte 3D" : canPlay(g) ? "Jouer" : "Options";
-
-  return `
-  <article class="card ${isOpen ? "open" : ""} ${running ? "is-running" : ""}" data-id="${g.id}"
-           style="--i:${enter ? Math.min(i, 16) : 0};${enter ? "" : "animation:none;"}view-transition-name:g-${g.id}">
-    <div class="cover" data-action="${coverAction}" title="${coverTitle}">
+  const pinned = state.profile?.showcase.includes(g.id) ?? false;
+  const uninstallable = g.category === "installed" && !!g.executable_path && !g.exe_missing && !running && !state.uninstalling.has(g.id);
+  const visual = boxMode
+    ? `<div class="box-slot" data-action="box" title="Voir la boîte 3D">
+        ${boxHtml(g, { w: boxWidth(), lite: true })}
+        <div class="absolute left-0 top-1 z-[2] flex flex-wrap gap-1.5">${badges.join("")}</div>
+      </div>`
+    : `<div class="cover" data-action="${coverAction}" title="${coverTitle}">
       ${coverHtml(g)}
       <div class="shade"></div>
       <div class="absolute left-2.5 top-2.5 flex flex-wrap gap-1.5">${badges.join("")}</div>
@@ -396,12 +468,22 @@ function cardHtml(g: Game, i: number): string {
           ? `<button class="play-fab" data-action="play" aria-label="Jouer à ${esc(g.title)}">${icon.play}</button>`
           : ""
       }
-    </div>
+    </div>`;
+
+  return `
+  <article class="card ${boxMode ? "boxed" : ""} ${isOpen ? "open" : ""} ${running ? "is-running" : ""}" data-id="${g.id}"
+           style="--i:${enter ? Math.min(i, 16) : 0};${enter ? "" : "animation:none;"}view-transition-name:g-${g.id}">
+    ${visual}
     <div class="mt-3 flex items-start gap-2 px-0.5">
       <div class="min-w-0 flex-1">
         <h3 class="truncate text-[15px] font-semibold" title="${esc(g.title)}">${esc(g.title)}</h3>
         <p class="mt-0.5 truncate text-xs text-muted">${sub}</p>
       </div>
+      ${
+        boxMode && canPlay(g) && !running
+          ? `<button class="opt-toggle play-mini" data-action="play" title="Jouer à ${esc(g.title)}">${icon.play}</button>`
+          : ""
+      }
       <button class="opt-toggle" data-action="toggle" aria-expanded="${isOpen}" title="Options">${icon.chevron}</button>
     </div>
     <div class="options"><div>
@@ -415,14 +497,29 @@ function cardHtml(g: Game, i: number): string {
         }
         <div class="opt-row"><span>Dernière session</span><span>${formatRelative(g.last_played_at)}</span></div>
         <div class="opt-row"><span>Version</span><span>${esc(g.version || "—")}</span></div>
-        <div class="opt-row"><span>Catégorie</span><span>${CATEGORY_LABEL[g.category]}</span></div>
+        <div class="opt-row"><span>Statut</span><span>${CATEGORY_LABEL[g.category]}</span></div>
+        <div class="opt-row"><span>Plateforme</span><span>${PLATFORM_LABEL[g.platform] ?? "—"}</span></div>
+        ${g.collection ? `<div class="opt-row"><span>Catégorie</span><span>${esc(g.collection)}</span></div>` : ""}
+      </div>
+      <div class="mt-2 grid grid-cols-2 gap-1.5">
+        ${
+          g.kind === "game"
+            ? `<button class="btn btn-ghost btn-sm min-w-0 !px-2" data-action="pin" aria-pressed="${pinned}" title="${pinned ? "Retirer de la vitrine du profil" : "Épingler sur la vitrine du profil"}">${pinned ? icon.check : icon.pin}<span class="truncate">Vitrine</span></button>`
+            : `<span></span>`
+        }
+        <button class="btn btn-ghost btn-sm min-w-0 !px-2" data-action="kind" title="${g.kind === "game" ? "Ranger dans « Logiciels »" : "Remettre dans les jeux"}">${g.kind === "game" ? icon.package : icon.gamepad}<span class="truncate">${g.kind === "game" ? "Logiciel" : "C'est un jeu"}</span></button>
       </div>
       <div class="mt-2 grid grid-cols-[1fr_auto_auto_auto] gap-1.5">
         <button class="btn btn-ghost btn-sm min-w-0 !px-2" data-action="open-folder" ${dir ? "" : "disabled"} title="Ouvrir l'emplacement : ${esc(dir)}">${icon.folder}<span class="truncate">Emplacement</span></button>
         <button class="btn btn-ghost btn-sm !px-2.5" data-action="cover" title="Personnaliser la jaquette">${icon.image}</button>
         <button class="btn btn-ghost btn-sm !px-2.5" data-action="edit" title="Modifier">${icon.edit}</button>
-        <button class="btn btn-danger btn-sm !px-2.5" data-action="delete" title="Supprimer">${icon.trash}</button>
+        <button class="btn btn-danger btn-sm !px-2.5" data-action="delete" title="Retirer de REZ launcher (les fichiers restent)">${icon.trash}</button>
       </div>
+      ${
+        uninstallable
+          ? `<button class="btn btn-danger btn-sm mt-1.5 w-full" data-action="uninstall" title="Lancer le désinstallateur officiel du jeu">${icon.uninstall}Désinstaller</button>`
+          : ""
+      }
     </div></div>
   </article>`;
 }
@@ -481,9 +578,52 @@ function renderGrid(): void {
     tickTimers();
     return;
   }
-  grid.innerHTML = list.map(cardHtml).join("");
+  const canReorder = state.sort === "custom" && state.group === "none" && !state.search.trim();
+  $("#order-hint")!.classList.toggle("hidden", !canReorder || list.length < 2);
+  if (state.group === "none") {
+    grid.innerHTML = list.map(cardHtml).join("");
+  } else {
+    const key = (g: Game) => (state.group === "platform" ? PLATFORM_LABEL[g.platform] ?? "Autres jeux PC" : g.collection || "Sans catégorie");
+    const groups = new Map<string, Game[]>();
+    list.forEach((g) => groups.set(key(g), [...(groups.get(key(g)) ?? []), g]));
+    const names = [...groups.keys()].sort((a, b) => {
+      const last = (n: string) => (n === "Sans catégorie" || n === "Autres jeux PC" ? 1 : 0);
+      return last(a) - last(b) || a.localeCompare(b, "fr", { sensitivity: "base" });
+    });
+    let i = 0;
+    grid.innerHTML = names
+      .map(
+        (n) => `<h3 class="group-head col-span-full"><span>${esc(n)}</span><small>${groups.get(n)!.length}</small></h3>${groups
+          .get(n)!
+          .map((g) => cardHtml(g, i++))
+          .join("")}`,
+      )
+      .join("");
+  }
   list.forEach((g) => state.seen.add(g.id));
+  if (canReorder) enableReorder(grid, (ids) => void saveOrder(ids));
+  else disableReorder();
   tickTimers();
+}
+
+/** Width of the 3D boxes of the "Boîte 3D" grid, from the card size setting. */
+function boxWidth(): number {
+  return { compact: 116, normal: 146, large: 184 }[state.settings.card_size];
+}
+
+/** Drag & drop result: the visible games in their new order (others keep theirs). */
+async function saveOrder(visibleIds: number[]): Promise<void> {
+  const rest = [...state.games].sort((a, b) => a.sort_order - b.sort_order).map((g) => g.id).filter((id) => !visibleIds.includes(id));
+  const ids = [...visibleIds, ...rest];
+  ids.forEach((id, i) => {
+    const g = state.games.find((x) => x.id === id);
+    if (g) g.sort_order = i + 1;
+  });
+  try {
+    await api.reorderGames(ids);
+  } catch (err) {
+    errorToast(err, "Ordre non enregistré");
+  }
 }
 
 function openBox(g: Game): void {
@@ -599,6 +739,12 @@ async function onGridClick(e: Event): Promise<void> {
       return openFolderOf(game);
     case "edit":
       return openGameForm(game);
+    case "pin":
+      return togglePin(game);
+    case "kind":
+      return setKind(game, game.kind === "game" ? "software" : "game");
+    case "uninstall":
+      return uninstall(game);
     case "delete": {
       const ok = await confirmModal(
         "Supprimer ce jeu ?",
@@ -620,6 +766,68 @@ async function onGridClick(e: Event): Promise<void> {
       }
       return;
     }
+  }
+}
+
+async function togglePin(g: Game): Promise<void> {
+  const p = state.profile;
+  if (!p) return;
+  const on = p.showcase.includes(g.id);
+  if (!on && p.showcase.length >= SHOWCASE_MAX) {
+    errorToast(`Ta vitrine contient déjà ${SHOWCASE_MAX} jeux. Retire-en un depuis ton profil.`, "Vitrine pleine");
+    return;
+  }
+  try {
+    await saveProfile({ ...p, showcase: on ? p.showcase.filter((id) => id !== g.id) : [...p.showcase, g.id] });
+    toast(on ? "Retiré de la vitrine" : "Épinglé sur ta vitrine", g.title);
+  } catch (err) {
+    errorToast(err);
+  }
+}
+
+async function setKind(g: Game, kind: Kind): Promise<void> {
+  try {
+    const saved = await api.updateGame(g.id, toInput(g, { kind }));
+    replaceGame(saved);
+    toast(kind === "software" ? "Rangé dans « Logiciels »" : "Remis dans les jeux", saved.title);
+  } catch (err) {
+    errorToast(err);
+  }
+}
+
+/** Official uninstaller (registry entry, Steam, or unins000.exe), then removal from the library. */
+async function uninstall(g: Game): Promise<void> {
+  let plan;
+  try {
+    plan = await api.uninstallInfo(g.id);
+  } catch (err) {
+    return errorToast(err);
+  }
+  if (!plan) {
+    errorToast(
+      "Aucun désinstallateur officiel trouvé. Désinstalle ce jeu depuis son launcher ou Paramètres Windows › Applications, puis retire-le de REZ launcher.",
+      "Désinstallation impossible",
+    );
+    return;
+  }
+  const how =
+    plan.via === "steam"
+      ? "Steam va ouvrir sa fenêtre de désinstallation : confirme-la dans Steam."
+      : `Le désinstallateur officiel du jeu va s'ouvrir :<br/><code class="break-all text-[11.5px]">${esc(plan.detail)}</code>`;
+  const ok = await confirmModal(
+    `Désinstaller ${g.title} ?`,
+    `${how}<br/><br/>Les fichiers du jeu seront supprimés <b class="text-white">par son propre désinstallateur</b>. Une fois terminé, le jeu et son historique (${formatPlaytime(g.playtime_minutes)}) quittent REZ launcher.`,
+    "Désinstaller",
+  );
+  if (!ok) return;
+  try {
+    await api.uninstallGame(g.id);
+    state.uninstalling.add(g.id);
+    state.open.delete(g.id);
+    if (state.view === "library") updateLibrary(false);
+    toast("Désinstallation lancée", "Suis les étapes du désinstallateur. REZ launcher attend la fin.");
+  } catch (err) {
+    errorToast(err, "Désinstallation impossible");
   }
 }
 
@@ -664,7 +872,7 @@ function onStarted(rg: RunningGame): void {
   updateLibrary(true);
 }
 
-/* Subtle 3D tilt + light sheen following the cursor. */
+/* Subtle 3D tilt following the cursor (no light effect). */
 function onTilt(e: MouseEvent): void {
   if (!state.settings.tilt) return;
   const cover = (e.target as HTMLElement).closest<HTMLElement>(".cover");
@@ -675,8 +883,6 @@ function onTilt(e: MouseEvent): void {
   const y = (e.clientY - r.top) / r.height;
   card.style.setProperty("--ry", `${(x - 0.5) * 10}deg`);
   card.style.setProperty("--rx", `${(0.5 - y) * 10}deg`);
-  card.style.setProperty("--mx", `${x * 100}%`);
-  card.style.setProperty("--my", `${y * 100}%`);
 }
 
 function resetTilt(e: Event): void {
@@ -707,7 +913,12 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
     cover_zoom: game?.cover_zoom ?? 1,
     cover_x: game?.cover_x ?? 50,
     cover_y: game?.cover_y ?? 50,
+    kind: game?.kind ?? "game",
+    collection: game?.collection ?? "",
   };
+  const collections = [...new Set(state.games.map((g) => g.collection).filter(Boolean))].sort((a, b) => a.localeCompare(b, "fr"));
+  const kindSeg = (k: Kind, label: string) =>
+    `<label><input type="radio" name="kind" value="${k}" ${v.kind === k ? "checked" : ""}/><span>${label}</span></label>`;
   const framing = { cover_zoom: v.cover_zoom, cover_x: v.cover_x, cover_y: v.cover_y };
   const seg = (c: Category, label: string) =>
     `<label><input type="radio" name="category" value="${c}" ${v.category === c ? "checked" : ""}/><span>${label}</span></label>`;
@@ -735,8 +946,15 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
         </div>
         <div><label class="label" for="f-cover">Jaquette (URL)</label>
           <input id="f-cover" name="cover_image_url" class="field" value="${esc(v.cover_image_url)}" placeholder="https://… (format portrait 3:4 conseillé)" spellcheck="false" /></div>
-        <div><span class="label">Catégorie</span>
+        <div><span class="label">Statut</span>
           <div class="seg">${seg("installed", "Installé")}${seg("not_installed", "Non installé")}${seg("launcher", "Launcher")}</div></div>
+        <div class="grid grid-cols-[1fr_1fr] gap-3">
+          <div><span class="label">Type</span>
+            <div class="seg">${kindSeg("game", "Jeu")}${kindSeg("software", "Logiciel")}</div></div>
+          <div><label class="label" for="f-coll">Catégorie</label>
+            <input id="f-coll" name="collection" class="field" value="${esc(v.collection)}" maxlength="40" list="f-colls" placeholder="FPS, Coop, Course…" />
+            <datalist id="f-colls">${collections.map((c) => `<option value="${esc(c)}"></option>`).join("")}</datalist></div>
+        </div>
         <div><label class="label" for="f-desc">Description <span class="normal-case tracking-normal text-white/30">(dos de la boîte 3D)</span></label>
           <textarea id="f-desc" name="description" class="field !h-20 resize-none !py-2.5 leading-snug" maxlength="4000" placeholder="Résumé, souvenirs, objectifs…">${esc(v.description)}</textarea></div>
       </div>
@@ -796,6 +1014,8 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
       category: String(fd.get("category") ?? "installed") as Category,
       description: String(fd.get("description") ?? ""),
       ...framing,
+      kind: String(fd.get("kind") ?? "game") as Kind,
+      collection: String(fd.get("collection") ?? ""),
     };
     const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
     submit.disabled = true;
@@ -984,6 +1204,8 @@ async function onLauncherClick(e: Event): Promise<void> {
           cover_zoom: 1,
           cover_x: 50,
           cover_y: 50,
+          kind: "game",
+          collection: "",
         });
         state.games.push(g);
         renderSidebar();
@@ -1002,6 +1224,78 @@ function refreshLaunchersInPlace(): void {
   $("#view")!.scrollTop = scroll;
   // Keep entry animations from replaying on in-place updates.
   document.querySelectorAll<HTMLElement>(".launcher-card").forEach((c) => (c.style.animation = "none"));
+}
+
+/* ============================== Profile & friends ============================== */
+
+async function saveProfile(p: Profile): Promise<void> {
+  state.profile = await api.saveProfile(p);
+  renderSidebar();
+  if (state.view === "profile") renderProfileView();
+  else if (state.view === "library") updateLibrary(false);
+}
+
+const profileCtx: ProfileCtx = {
+  profile: () => state.profile!,
+  games: () => state.games,
+  code: () => state.social?.me.code ?? "",
+  save: saveProfile,
+  openBox: (g) => openBox(g),
+};
+
+function renderProfileView(): void {
+  const view = $("#view")!;
+  if (!state.profile) {
+    view.innerHTML = "";
+    void loadProfile().then(() => state.view === "profile" && renderProfileView());
+    return;
+  }
+  renderProfile(view, profileCtx);
+}
+
+function renderFriendsView(): void {
+  renderFriends($("#view")!, {
+    social: () => state.social,
+    setEnabled: async (on) => {
+      try {
+        await saveSettings({ social_enabled: on });
+        await refreshSocial();
+        toast(on ? "Amis activés" : "Amis désactivés", on ? "Tu es visible sur ton réseau local." : "Tu n'es plus visible sur le réseau.");
+      } catch (err) {
+        errorToast(err);
+      }
+    },
+    refresh: refreshSocial,
+  });
+}
+
+async function loadProfile(): Promise<void> {
+  try {
+    state.profile = await api.getProfile();
+  } catch {
+    /* profile is optional */
+  }
+}
+
+/** Reload friends / presence. Toasts new friend requests. */
+async function refreshSocial(): Promise<void> {
+  const before = new Set(state.social?.friends.filter((f) => f.state === "incoming").map((f) => f.id) ?? []);
+  try {
+    state.social = await api.socialState();
+  } catch {
+    return;
+  }
+  if (state.social.enabled) {
+    state.social.friends
+      .filter((f) => f.state === "incoming" && !before.has(f.id) && state.social !== null)
+      .forEach((f) => toast("Demande d'ami", `${f.name} veut t'ajouter. Réponds depuis « Amis ».`, "info", 7000));
+  }
+  renderSidebar();
+  if (state.view === "friends") {
+    const scroll = $("#view")!.scrollTop;
+    renderFriendsView();
+    $("#view")!.scrollTop = scroll;
+  }
 }
 
 /* ============================== Settings view ============================== */
@@ -1076,27 +1370,6 @@ async function setupDragDrop(): Promise<void> {
   });
 }
 
-/** Specular highlight of the glass panels follows the pointer. */
-function setupGlassHighlight(): void {
-  let pending = false;
-  let x = 0;
-  let y = 0;
-  document.addEventListener("pointermove", (e) => {
-    x = e.clientX;
-    y = e.clientY;
-    if (pending || !state.settings.glass) return;
-    pending = true;
-    requestAnimationFrame(() => {
-      pending = false;
-      document.querySelectorAll<HTMLElement>(".liquid").forEach((el) => {
-        const r = el.getBoundingClientRect();
-        el.style.setProperty("--gx", `${x - r.left}px`);
-        el.style.setProperty("--gy", `${y - r.top}px`);
-      });
-    });
-  });
-}
-
 async function boot(): Promise<void> {
   if (!isTauri()) {
     const m = await import("./mock");
@@ -1135,6 +1408,13 @@ async function boot(): Promise<void> {
   } catch (err) {
     errorToast(err, "Chargement de la bibliothèque impossible");
   }
+  await loadProfile();
+  void refreshSocial();
+  try {
+    state.uninstalling = new Set(await api.uninstallingGames());
+  } catch {
+    /* none */
+  }
 
   await events.onGameStarted(onStarted);
   await events.onGameReady(({ game_id }) => onReady(game_id));
@@ -1153,6 +1433,19 @@ async function boot(): Promise<void> {
       7000,
     );
   });
+  await events.onGameUninstalled(({ game_id, title, removed }) => {
+    state.uninstalling.delete(game_id);
+    if (removed) {
+      state.games = state.games.filter((g) => g.id !== game_id);
+      if (state.profile?.showcase.includes(game_id)) state.profile.showcase = state.profile.showcase.filter((id) => id !== game_id);
+      toast("Jeu désinstallé", `${title} a été désinstallé et retiré de ta bibliothèque.`);
+    } else {
+      toast(`${title} toujours installé`, "Désinstallation annulée ou incomplète : le jeu reste dans ta bibliothèque.", "info", 7000);
+    }
+    renderSidebar();
+    if (state.view === "library") updateLibrary(true);
+  });
+  await events.onSocialUpdated(() => void refreshSocial());
   await events.onGamesDetected(() => {
     void api.pendingDetections().then((l) => showDetections(l, detectionCtx), () => {});
   });
@@ -1165,8 +1458,10 @@ async function boot(): Promise<void> {
 
   setInterval(tickTimers, 1000);
   // Back in REZ launcher during a game: animate again.
-  window.addEventListener("focus", () => document.documentElement.classList.remove("gaming"));
-  setupGlassHighlight();
+  const backInApp = () => document.documentElement.classList.remove("gaming");
+  window.addEventListener("focus", backInApp);
+  document.addEventListener("pointerdown", backInApp);
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && backInApp());
   void api.fillMissingCovers().then((changed) => changed.forEach(replaceGame), () => {});
   state.view = state.settings.start_view;
   renderSidebar();

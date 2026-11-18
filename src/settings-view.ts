@@ -84,13 +84,13 @@ export function renderSettings(view: HTMLElement, ctx: SettingsCtx): void {
           </div>
           ${row(
             "Affichage de la bibliothèque",
-            "Grille classique, grille avec boîte 3D au clic, ou carrousel 3D de boîtes.",
+            "Grille de jaquettes, étagère de boîtes 3D (clic = boîte interactive), ou carrousel 3D.",
             seg<LibraryView>("library_view", s.library_view, [["grid", "Grille"], ["box3d", "Boîte 3D"], ["carousel", "Carrousel 3D"]]),
           )}
-          ${row("Effet verre Apple", "Verre givré, reflets et bordures lumineuses sur la barre latérale et les catégories.", sw("glass", s.glass, "Effet verre"))}
+          ${row("Effet verre Apple", "Verre givré et bordures fines sur la barre latérale et les catégories.", sw("glass", s.glass, "Effet verre"))}
           ${row("Taille des jaquettes", "", seg<CardSize>("card_size", s.card_size, [["compact", "Compacte"], ["normal", "Normale"], ["large", "Grande"]]))}
           ${row("Animations", "Transitions et apparitions fluides de l'interface.", sw("animations", s.animations, "Animations"))}
-          ${row("Effet 3D des jaquettes", "Inclinaison et reflet qui suivent la souris.", sw("tilt", s.tilt, "Effet 3D"))}
+          ${row("Effet 3D des jaquettes", "Légère inclinaison des jaquettes sous la souris.", sw("tilt", s.tilt, "Effet 3D"))}
           ${row("Fond animé", "Halo acier et grille en arrière-plan.", sw("ambient", s.ambient, "Fond animé"))}
         </section>
 

@@ -1,4 +1,5 @@
-// Cover editor: import an image, then pan / zoom / centre it inside the 3:4 frame.
+// Image editor: import an image, then pan / zoom / centre it inside its frame
+// (3:4 game cover, round profile picture or 3:1 profile banner).
 // The framing is stored as (zoom, focal x %, focal y %); the image file itself is
 // never modified.
 import { coverSrc } from "./api";
@@ -12,6 +13,9 @@ import { errorToast } from "./ui";
 export interface CoverEditorOpts {
   /** Native picker; returns the stored path of the imported image, or null. */
   pickImage: () => Promise<string | null>;
+  /** Frame shape (default: game cover). */
+  shape?: "cover" | "avatar" | "banner";
+  heading?: string;
 }
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
@@ -19,22 +23,24 @@ const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 export function openCoverEditor(initial: CoverLike, opts: CoverEditorOpts): Promise<CoverLike | null> {
   return new Promise((resolve) => {
     const d: CoverLike = { ...initial };
+    const shape = opts.shape ?? "cover";
+    const isCover = shape === "cover";
     const layer = document.createElement("div");
     layer.className = "layer ce-layer";
     layer.style.zIndex = "85";
     layer.innerHTML = `
       <div class="layer-bg"></div>
-      <div class="ce" role="dialog" aria-modal="true" aria-label="Personnaliser la jaquette">
+      <div class="ce shape-${shape}" role="dialog" aria-modal="true" aria-label="${esc(opts.heading ?? "Personnaliser la jaquette")}">
         <div class="flex items-center justify-between px-6 pt-5">
           <div>
-            <h2 class="font-display text-lg font-bold tracking-tight">Personnaliser la jaquette</h2>
+            <h2 class="font-display text-lg font-bold tracking-tight">${esc(opts.heading ?? "Personnaliser la jaquette")}</h2>
             <p class="text-xs text-muted">${esc(initial.title)}</p>
           </div>
           <button class="opt-toggle" data-act="cancel" title="Fermer">${icon.x}</button>
         </div>
         <div class="ce-body">
           <div>
-            <div class="ce-frame" data-frame></div>
+            <div class="ce-frame shape-${shape}" data-frame></div>
             <p class="mt-2.5 text-center text-[11.5px] text-muted">Glisse pour déplacer · molette pour zoomer · double-clic pour centrer</p>
           </div>
           <div class="flex min-w-0 flex-col gap-4">
@@ -63,10 +69,10 @@ export function openCoverEditor(initial: CoverLike, opts: CoverEditorOpts): Prom
               <div class="flex flex-1 flex-col gap-2 pt-[22px]">
                 <button class="btn btn-ghost btn-sm" data-act="center">${icon.crosshair}Centrer</button>
                 <button class="btn btn-ghost btn-sm" data-act="reset">${icon.refresh}Réinitialiser</button>
-                <button class="btn btn-ghost btn-sm" data-act="remove">${icon.trash}Jaquette générée</button>
+                <button class="btn btn-ghost btn-sm" data-act="remove">${icon.trash}${isCover ? "Jaquette générée" : "Retirer l'image"}</button>
               </div>
             </div>
-            <div class="ce-preview" data-preview></div>
+            ${isCover ? `<div class="ce-preview" data-preview></div>` : ""}
           </div>
         </div>
         <div class="flex justify-end gap-2 border-t border-white/5 px-6 py-4">
@@ -80,7 +86,7 @@ export function openCoverEditor(initial: CoverLike, opts: CoverEditorOpts): Prom
     const zoomIn = layer.querySelector<HTMLInputElement>("[data-zoom]")!;
     const zoomVal = layer.querySelector<HTMLElement>("[data-zoom-val]")!;
     const urlIn = layer.querySelector<HTMLInputElement>("[data-url]")!;
-    const preview = layer.querySelector<HTMLElement>("[data-preview]")!;
+    const preview = layer.querySelector<HTMLElement>("[data-preview]");
     urlIn.value = /^https?:/i.test(d.cover_image_url) ? d.cover_image_url : "";
 
     const hasImage = () => !!coverSrc(d.cover_image_url);
@@ -89,8 +95,10 @@ export function openCoverEditor(initial: CoverLike, opts: CoverEditorOpts): Prom
     const renderImage = () => {
       frame.innerHTML = `${coverHtml(d, false)}<i class="ce-thirds"></i><i class="ce-focus"></i>`;
       frame.classList.toggle("static", !hasImage());
-      preview.innerHTML = boxHtml(d, { w: 116 });
-      makeRotatable(preview.querySelector<HTMLElement>(".box3d")!, { bx: -8, by: -28 });
+      if (preview) {
+        preview.innerHTML = boxHtml(d, { w: 116 });
+        makeRotatable(preview.querySelector<HTMLElement>(".box3d")!, { bx: -8, by: 28 });
+      }
       layer.querySelectorAll<HTMLButtonElement>("[data-nudge],[data-act=center],[data-act=reset]").forEach((b) => (b.disabled = !hasImage()));
       zoomIn.disabled = !hasImage();
       applyFraming();

@@ -11,7 +11,166 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::db::Detected;
+use crate::db::{Detected, Kind};
+
+// ------------------------------------------------------- Games vs software
+
+/// Steam apps that are tools, not games (Wallpaper Engine, Crosshair X,
+/// Lossless Scaling, SteamVR, Soundpad, OBS Studio, 3DMark, Blender,
+/// Source Filmmaker, Borderless Gaming).
+const STEAM_SOFTWARE_IDS: &[u32] = &[
+    431960, 1366800, 993090, 250820, 629520, 1905180, 223850, 365670, 1840, 388080,
+];
+
+/// Words (lowercase, alphanumeric only) that mark a utility, an overlay or a
+/// creative tool rather than a game. Matched against the title and the exe name.
+const SOFTWARE_WORDS: &[&str] = &[
+    "wallpaperengine",
+    "crosshairx",
+    "crosshair",
+    "losslessscaling",
+    "steamvr",
+    "soundpad",
+    "voicemod",
+    "obsstudio",
+    "fpsmonitor",
+    "3dmark",
+    "pcmark",
+    "vrmark",
+    "furmark",
+    "cinebench",
+    "aida64",
+    "benchmark",
+    "msiafterburner",
+    "afterburner",
+    "rivatuner",
+    "hwinfo",
+    "hwmonitor",
+    "blender",
+    "aseprite",
+    "rpgmaker",
+    "gamemaker",
+    "unityhub",
+    "sourcefilmmaker",
+    "borderlessgaming",
+    "controllercompanion",
+    "ds4windows",
+    "reshade",
+    "specialk",
+    "discord",
+    "spotify",
+    "overwolf",
+    "medalclip",
+    "outplayed",
+    "nvidiaapp",
+    "geforceexperience",
+    "nvidiabroadcast",
+    "razersynapse",
+    "razercortex",
+    "logitechghub",
+    "signalrgb",
+    "openrgb",
+    "rainmeter",
+    "displayfusion",
+    "duetdisplay",
+    "virtualdesktop",
+    "oculusclient",
+    "steamlink",
+    "parsec",
+    "playnite",
+    "launchbox",
+    "overlay",
+    "audacity",
+    "krita",
+    "gimp",
+    "davinciresolve",
+    "handbrake",
+];
+
+/// Short executable names of utilities, matched exactly (too short for a substring test).
+const SOFTWARE_EXES: &[&str] = &[
+    "rtss",
+    "dsx",
+    "icue",
+    "cpuz",
+    "gpuz",
+    "obs64",
+    "obs32",
+    "wallpaper64",
+    "wallpaper32",
+    "vrmonitor",
+    "lghub",
+    "medal",
+    "parsecd",
+];
+
+/// True when a title / executable looks like a utility rather than a game.
+/// `steam_id` (when known) is checked against Steam's known software apps.
+pub fn is_software(title: &str, exe: &str, steam_id: Option<u32>) -> bool {
+    if steam_id.is_some_and(|id| STEAM_SOFTWARE_IDS.contains(&id)) {
+        return true;
+    }
+    let stem = Path::new(exe)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (t, x) = (alnum(title), alnum(&stem));
+    if SOFTWARE_EXES.contains(&x.as_str()) {
+        return true;
+    }
+    SOFTWARE_WORDS
+        .iter()
+        .any(|w| t.contains(w) || (!x.is_empty() && x.contains(w)))
+}
+
+/// Store / launcher a game belongs to, guessed from where it is installed.
+pub fn platform_of(install_dir: &str, exe: &str) -> &'static str {
+    let p = format!("\\{}\\{}", install_dir, exe)
+        .replace('/', "\\")
+        .to_lowercase();
+    const RULES: &[(&str, &[&str])] = &[
+        ("steam", &["\\steamapps\\"]),
+        ("epic", &["\\epic games\\", "\\epicgames\\"]),
+        (
+            "gog",
+            &[
+                "\\gog games\\",
+                "\\gog galaxy\\",
+                "\\goggalaxy\\",
+                "\\gog.com\\",
+            ],
+        ),
+        (
+            "ea",
+            &[
+                "\\ea games\\",
+                "\\electronic arts\\",
+                "\\eaapp\\",
+                "\\origin games\\",
+                "\\ea desktop\\",
+            ],
+        ),
+        (
+            "ubisoft",
+            &[
+                "\\ubisoft\\",
+                "\\ubisoft game launcher\\",
+                "\\ubisoftconnect\\",
+            ],
+        ),
+        (
+            "battlenet",
+            &["\\battle.net\\", "\\blizzard", "\\battlenet\\"],
+        ),
+        ("rockstar", &["\\rockstar games\\"]),
+        ("xbox", &["\\xboxgames\\", "\\windowsapps\\"]),
+    ];
+    RULES
+        .iter()
+        .find(|(_, pats)| pats.iter().any(|x| p.contains(x)))
+        .map(|(id, _)| *id)
+        .unwrap_or("pc")
+}
 
 /// Identity of a detection: lowercase install folder without trailing separator.
 pub fn key_for(dir: &Path) -> String {
@@ -30,6 +189,7 @@ const LAUNCHER_EXES: &[&str] = &[
     "galaxyclient.exe",
     "eadesktop.exe",
     "origin.exe",
+    "launcherpatcher.exe",
     "rez-launcher.exe",
 ];
 
@@ -55,6 +215,8 @@ const CONTAINER_DIRS: &[&str] = &[
     "jeux",
     "launchers",
     "xboxgames",
+    "rockstar games",
+    "rockstargames",
 ];
 
 /// Sub-folders never searched for the main executable.
@@ -223,12 +385,29 @@ pub fn main_exe_named(dir: &Path, hint: Option<&str>) -> Option<PathBuf> {
 }
 
 fn detected(title: &str, exe: &Path, dir: &Path, source: &str) -> Detected {
+    detected_with(title, exe, dir, source, None)
+}
+
+fn detected_with(
+    title: &str,
+    exe: &Path,
+    dir: &Path,
+    source: &str,
+    steam_id: Option<u32>,
+) -> Detected {
+    let executable_path = exe.to_string_lossy().into_owned();
+    let kind = if is_software(title, &executable_path, steam_id) {
+        Kind::Software
+    } else {
+        Kind::Game
+    };
     Detected {
         key: key_for(dir),
         title: title.trim().to_string(),
-        executable_path: exe.to_string_lossy().into_owned(),
+        executable_path,
         install_dir: dir.to_string_lossy().into_owned(),
         source: source.into(),
+        kind,
     }
 }
 
@@ -339,8 +518,12 @@ fn steam_games(skip: &HashSet<String>) -> Vec<Detected> {
             if skip.contains(&key_for(&dir)) || !dir.is_dir() {
                 continue;
             }
+            let app_id = fname
+                .strip_prefix("appmanifest_")
+                .and_then(|f| f.strip_suffix(".acf"))
+                .and_then(|f| f.parse::<u32>().ok());
             if let Some(exe) = main_exe_named(&dir, Some(&name)) {
-                out.push(detected(&name, &exe, &dir, "steam"));
+                out.push(detected_with(&name, &exe, &dir, "steam", app_id));
             }
         }
     }
@@ -642,6 +825,52 @@ mod tests {
             found.iter().find(|d| d.title == "Neon Drift").unwrap().key,
             key_for(&root.join("Neon Drift"))
         );
+    }
+
+    #[test]
+    fn tells_software_from_games() {
+        assert!(is_software(
+            "Wallpaper Engine",
+            r"D:\S\wallpaper32.exe",
+            None
+        ));
+        assert!(is_software("Crosshair X", "", None));
+        assert!(is_software("Whatever", r"C:\x\CrosshairX.exe", None));
+        assert!(is_software("Tool", "", Some(993090)));
+        assert!(is_software("MSI Afterburner", "", None));
+        assert!(!is_software(
+            "Counter-Strike 2",
+            r"D:\cs2\cs2.exe",
+            Some(730)
+        ));
+        assert!(!is_software(
+            "Hollow Knight",
+            r"D:\HK\hollow_knight.exe",
+            None
+        ));
+        assert!(!is_software("Grand Theft Auto V", r"D:\GTA\GTA5.exe", None));
+    }
+
+    #[test]
+    fn guesses_platform_from_path() {
+        assert_eq!(
+            platform_of(r"D:\SteamLibrary\steamapps\common\Portal 2", ""),
+            "steam"
+        );
+        assert_eq!(
+            platform_of("", r"C:\Program Files\Epic Games\Hades\Hades.exe"),
+            "epic"
+        );
+        assert_eq!(platform_of(r"D:\Jeux\EAapp\FC 25", ""), "ea");
+        assert_eq!(
+            platform_of(r"C:\Program Files\Rockstar Games\GTAV", ""),
+            "rockstar"
+        );
+        assert_eq!(
+            platform_of(r"D:\Jeux\Battle.net\Overwatch", ""),
+            "battlenet"
+        );
+        assert_eq!(platform_of(r"D:\Jeux\Celeste", ""), "pc");
     }
 
     #[test]

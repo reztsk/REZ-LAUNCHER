@@ -52,6 +52,11 @@ const TIPS: Record<string, LauncherTips> = {
     libraryTip: "EA app › Paramètres › Téléchargement › « Emplacement d'installation des jeux ».",
     librarySub: "Games",
   },
+  rockstar: {
+    installerTip: "Dans l'installateur du Rockstar Games Launcher, choisis « Parcourir » à l'étape du dossier d'installation.",
+    libraryTip: "Rockstar Games Launcher › Paramètres › Jeux installés : à chaque installation, choisis le dossier ci-dessous.",
+    librarySub: "Games",
+  },
 };
 
 /** Join a Windows path safely: ("D:\\", "Jeux") -> "D:\\Jeux". */

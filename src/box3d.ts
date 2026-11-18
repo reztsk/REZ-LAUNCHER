@@ -11,6 +11,8 @@ export interface BoxOptions {
   /** Front swings open on `.open` (launch sequence). */
   door?: boolean;
   cls?: string;
+  /** Plain back cover (no blurred artwork): for grids of many boxes. */
+  lite?: boolean;
 }
 
 /** Text of the back cover: the user's description, or a generated one. */
@@ -62,7 +64,7 @@ export function boxHtml(g: Game | CoverLike, o: BoxOptions): string {
           ? `<div class="face inner"><i class="disc"></i></div><div class="door">${front}<div class="face door-in"></div></div>`
           : front
       }
-      <div class="face back">${backHtml(g)}</div>
+      <div class="face back ${o.lite ? "lite" : ""}">${o.lite ? "" : backHtml(g)}</div>
       <div class="face spine"><span class="spine-logo"></span><b>${esc(g.title)}</b><i>REZ</i></div>
       <div class="face side-r"></div>
       <div class="face top"></div>
@@ -78,7 +80,7 @@ export function setRotation(box: HTMLElement, bx: number, by: number): void {
 }
 
 /** Drag-to-rotate on a `.box3d`, with an idle float when left alone. */
-export function makeRotatable(box: HTMLElement, start = { bx: -6, by: -24 }): { set: (bx: number, by: number) => void } {
+export function makeRotatable(box: HTMLElement, start = { bx: -6, by: 24 }): { set: (bx: number, by: number) => void } {
   let { bx, by } = start;
   setRotation(box, bx, by);
   let drag: { x: number; y: number; bx: number; by: number } | null = null;
@@ -166,7 +168,7 @@ export function openGameBox(g: Game, ctx: BoxViewerCtx): void {
   document.body.appendChild(layer);
   const box = layer.querySelector<HTMLElement>(".box3d")!;
   const rot = makeRotatable(box);
-  const faces: Record<string, [number, number]> = { front: [-6, -24], spine: [-4, 90], back: [-6, 180] };
+  const faces: Record<string, [number, number]> = { front: [-6, 24], spine: [-4, 90], back: [-6, 180] };
   const order = ["front", "spine", "back"];
   let face = "front";
   const show = (f: string) => {
