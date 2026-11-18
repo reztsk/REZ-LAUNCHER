@@ -1,6 +1,6 @@
 //! Launch games and measure exact playtime.
 //!
-//! Safety model (anti-ban): GameREZ only starts the executable through the OS
+//! Safety model (anti-ban): REZ launcher only starts the executable through the OS
 //! (`std::process::Command`, or the Windows shell for shortcuts / UAC) and then
 //! *observes* process lifetimes. It never opens a game process handle for
 //! writing, never reads/writes its memory, never touches game files.
@@ -314,7 +314,7 @@ pub fn launch(
                     },
                 );
             }
-            Err(e) => eprintln!("[gamerez] finish_session failed: {e}"),
+            Err(e) => eprintln!("[rez] finish_session failed: {e}"),
         }
     });
 
@@ -370,7 +370,7 @@ async fn watch_session(
             let at = (started_wall + chrono::Duration::seconds(secs))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             if let Err(e) = db.heartbeat_session(session_id, &at, secs) {
-                eprintln!("[gamerez] heartbeat failed: {e}");
+                eprintln!("[rez] heartbeat failed: {e}");
             }
         }
     }
@@ -434,6 +434,7 @@ mod tests {
             category: Category::Installed,
             added_at: String::new(),
             last_played_at: None,
+            session_count: 0,
             exe_missing: false,
         };
         assert_eq!(watch_dir_for(&g), Some(PathBuf::from(r"D:\Jeux\Hero\bin")));

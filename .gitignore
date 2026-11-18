@@ -8,3 +8,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .claude/
+
+# Release staging (scripts/release-assets.mjs)
+release-out/

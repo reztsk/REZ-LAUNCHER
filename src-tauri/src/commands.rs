@@ -1,23 +1,32 @@
 //! Tauri commands exposed to the frontend.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
-use crate::db::{Database, Game, GameInput};
+use crate::db::{Category, Database, Detected, Game, GameInput};
+use crate::detect;
 use crate::error::{AppError, AppResult};
 use crate::exe_info::{self, ScannedExe};
 use crate::launchers::{self, LauncherInfo};
+use crate::settings::Settings;
 use crate::watcher::{self, RunningGame, Tracker};
+
+pub const REPO_URL: &str = "https://github.com/reztsk/GameREZ";
 
 pub struct AppState {
     pub db: Arc<Database>,
     pub tracker: Arc<Tracker>,
+    pub data_dir: PathBuf,
     pub covers_dir: PathBuf,
+    pub pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
 }
 
 #[tauri::command]
@@ -44,7 +53,7 @@ pub fn delete_game(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     }
     let game = state.db.get_game(id)?;
     state.db.delete_game(id)?;
-    // Remove the cover only if GameREZ owns it (copied into its covers folder).
+    // Remove the cover only if REZ launcher owns it (copied into its covers folder).
     let cover = Path::new(&game.cover_image_url);
     if cover.starts_with(&state.covers_dir) {
         let _ = std::fs::remove_file(cover);
@@ -120,7 +129,7 @@ pub async fn scan_executable(
     Ok(Some(scanned))
 }
 
-/// Pick a local cover image; it is copied into GameREZ's covers folder.
+/// Pick a local cover image; it is copied into REZ launcher's covers folder.
 #[tauri::command]
 pub async fn pick_cover(app: AppHandle, state: State<'_, AppState>) -> AppResult<Option<String>> {
     let picked = app
@@ -233,9 +242,405 @@ pub fn create_folder(app: AppHandle, path: String) -> AppResult<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+// ================================================================ Settings
+
+#[tauri::command]
+pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> Settings {
+    let mut s = Settings::load(&state.db);
+    if let Ok(on) = app.autolaunch().is_enabled() {
+        s.launch_at_startup = on;
+    }
+    s
+}
+
+#[tauri::command]
+pub fn save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> AppResult<Settings> {
+    let mut s = settings.normalized()?;
+    let auto = app.autolaunch();
+    if auto.is_enabled().ok() != Some(s.launch_at_startup) {
+        let res = if s.launch_at_startup {
+            auto.enable()
+        } else {
+            auto.disable()
+        };
+        if let Err(e) = res {
+            s.launch_at_startup = !s.launch_at_startup;
+            s.save(&state.db)?;
+            return Err(AppError::Other(format!("Démarrage automatique : {e}")));
+        }
+    }
+    s.save(&state.db)?;
+    Ok(s)
+}
+
+/// Native folder picker (for game search folders).
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle) -> AppResult<Option<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choisir un dossier de jeux")
+        .blocking_pick_folder();
+    match picked {
+        Some(fp) => Ok(Some(
+            fp.into_path()
+                .map_err(|e| AppError::Other(e.to_string()))?
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        None => Ok(None),
+    }
+}
+
+// =========================================================== Game detection
+
+/// Folders and executables already in the library (never proposed again).
+fn library_keys(games: &[Game]) -> (HashSet<String>, HashSet<String>) {
+    let mut dirs = HashSet::new();
+    let mut exes = HashSet::new();
+    for g in games {
+        if !g.install_dir.is_empty() {
+            dirs.insert(detect::key_for(Path::new(&g.install_dir)));
+        }
+        if !g.executable_path.is_empty() {
+            exes.insert(g.executable_path.to_lowercase());
+            if let Some(parent) = Path::new(&g.executable_path).parent() {
+                dirs.insert(detect::key_for(parent));
+            }
+        }
+    }
+    (dirs, exes)
+}
+
+fn in_library(d: &Detected, dirs: &HashSet<String>, exes: &HashSet<String>) -> bool {
+    let prefix = format!("{}\\", d.key);
+    exes.contains(&d.executable_path.to_lowercase())
+        || dirs.contains(&d.key)
+        || dirs.iter().any(|k| k.starts_with(&prefix))
+}
+
+/// One read-only scan. New games are stored as `pending` and returned.
+pub fn detection_pass(db: &Database, search_paths: &[String]) -> AppResult<Vec<Detected>> {
+    let games = db.list_games()?;
+    let (dirs, exes) = library_keys(&games);
+    let mut skip: HashSet<String> = db.detection_statuses()?.into_keys().collect();
+    skip.extend(dirs.iter().cloned());
+    let found: Vec<Detected> = detect::scan(search_paths, &skip)
+        .into_iter()
+        .filter(|d| !in_library(d, &dirs, &exes))
+        .collect();
+    db.insert_detections(&found, "pending")?;
+    Ok(found)
+}
+
+/// Background loop: scan every 90 s and notify the UI about new games.
+pub fn spawn_detection_loop(app: AppHandle, db: Arc<Database>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        loop {
+            let settings = Settings::load(&db);
+            if settings.detect_new_games {
+                let db2 = db.clone();
+                let res = tauri::async_runtime::spawn_blocking(move || {
+                    detection_pass(&db2, &settings.search_paths)
+                })
+                .await;
+                match res {
+                    Ok(Ok(found)) if !found.is_empty() => {
+                        let _ = app.emit("games-detected", &found);
+                    }
+                    Ok(Err(e)) => eprintln!("[rez] detection failed: {e}"),
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+        }
+    });
+}
+
+/// Games detected but not answered yet (shown in the pop-up).
+#[tauri::command]
+pub fn pending_detections(state: State<'_, AppState>) -> AppResult<Vec<Detected>> {
+    let games = state.db.list_games()?;
+    let (dirs, exes) = library_keys(&games);
+    Ok(state
+        .db
+        .detections_with_status(&["pending"])?
+        .into_iter()
+        .filter(|d| !in_library(d, &dirs, &exes))
+        .collect())
+}
+
+/// "Scanner maintenant": every installed game not in the library and not ignored.
+#[tauri::command]
+pub async fn scan_games_now(state: State<'_, AppState>) -> AppResult<Vec<Detected>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = Settings::load(&db);
+        detection_pass(&db, &settings.search_paths)?;
+        let games = db.list_games()?;
+        let (dirs, exes) = library_keys(&games);
+        Ok(db
+            .detections_with_status(&["pending", "seen"])?
+            .into_iter()
+            .filter(|d| !in_library(d, &dirs, &exes) && Path::new(&d.executable_path).is_file())
+            .collect())
+    })
+    .await
+    .map_err(|e| AppError::Other(e.to_string()))?
+}
+
+/// Answer the pop-up: `add` creates library entries (shortcuts only),
+/// `ignore` never proposes them again, `later` keeps them for a manual scan.
+#[tauri::command]
+pub fn resolve_detections(
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+    action: String,
+) -> AppResult<Vec<Game>> {
+    match action.as_str() {
+        "add" => {
+            let mut added = Vec::new();
+            let mut done = Vec::new();
+            for key in keys {
+                let Some(d) = state.db.get_detection(&key)? else {
+                    continue;
+                };
+                let version = exe_info::scan(Path::new(&d.executable_path)).version;
+                added.push(state.db.insert_game(GameInput {
+                    title: d.title,
+                    executable_path: d.executable_path,
+                    install_dir: d.install_dir,
+                    cover_image_url: String::new(),
+                    version,
+                    category: Category::Installed,
+                })?);
+                done.push(key);
+            }
+            state.db.set_detection_status(&done, "added")?;
+            Ok(added)
+        }
+        "ignore" => {
+            state.db.set_detection_status(&keys, "ignored")?;
+            Ok(Vec::new())
+        }
+        "later" => {
+            state.db.set_detection_status(&keys, "seen")?;
+            Ok(Vec::new())
+        }
+        other => Err(AppError::Invalid(format!("Action inconnue : {other}"))),
+    }
+}
+
+#[tauri::command]
+pub fn reset_ignored_detections(state: State<'_, AppState>) -> AppResult<usize> {
+    state.db.reset_ignored_detections()
+}
+
+// ================================================================ Data / cache
+
+#[derive(Debug, Serialize)]
+pub struct CacheReport {
+    pub files_removed: usize,
+    pub bytes_freed: u64,
+}
+
+/// Remove covers no game uses anymore (only inside REZ launcher's own folder)
+/// and the web cache of remote covers. Library and playtime are kept.
+#[tauri::command]
+pub fn clear_cache(app: AppHandle, state: State<'_, AppState>) -> AppResult<CacheReport> {
+    let used: HashSet<String> = state
+        .db
+        .cover_paths()?
+        .into_iter()
+        .map(|p| p.to_lowercase())
+        .collect();
+    let mut report = CacheReport {
+        files_removed: 0,
+        bytes_freed: 0,
+    };
+    if let Ok(entries) = std::fs::read_dir(&state.covers_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !e.file_type().is_ok_and(|t| t.is_file())
+                || used.contains(&p.to_string_lossy().to_lowercase())
+            {
+                continue;
+            }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&p).is_ok() {
+                report.files_removed += 1;
+                report.bytes_freed += size;
+            }
+        }
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.clear_all_browsing_data();
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn open_data_dir(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    app.opener()
+        .open_path(state.data_dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| AppError::Other(format!("Ouverture impossible : {e}")))
+}
+
+#[tauri::command]
+pub fn open_repo(app: AppHandle) -> AppResult<()> {
+    app.opener()
+        .open_url(REPO_URL, None::<&str>)
+        .map_err(|e| AppError::Other(format!("Navigateur indisponible : {e}")))
+}
+
+// ================================================================== Updates
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub current_version: String,
+    pub notes: String,
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateProgress {
+    pub downloaded: u64,
+    pub total: Option<u64>,
+}
+
+/// Ask GitHub Releases (signed `latest.json`) whether a newer version exists.
+#[tauri::command]
+pub async fn check_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Option<UpdateInfo>> {
+    let updater = app
+        .updater()
+        .map_err(|e| AppError::Other(format!("Mise à jour indisponible : {e}")))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| AppError::Other(format!("Vérification impossible : {e}")))?;
+    let info = update.as_ref().map(|u| UpdateInfo {
+        version: u.version.clone(),
+        current_version: u.current_version.clone(),
+        notes: u.body.clone().unwrap_or_default(),
+        date: u.date.map(|d| d.to_string()),
+    });
+    *state
+        .pending_update
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = update;
+    Ok(info)
+}
+
+/// Download the signed installer, verify it, install it and restart.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    if !state.tracker.list().is_empty() {
+        return Err(AppError::Invalid(
+            "Ferme ton jeu avant de mettre à jour (session en cours).".into(),
+        ));
+    }
+    let update = state
+        .pending_update
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| AppError::Invalid("Aucune mise à jour en attente.".into()))?;
+    let mut downloaded = 0u64;
+    let emitter = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = emitter.emit("update-progress", UpdateProgress { downloaded, total });
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| AppError::Other(format!("Installation impossible : {e}")))?;
+    app.restart();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn game(dir: &str, exe: &str) -> Game {
+        Game {
+            id: 1,
+            title: "G".into(),
+            executable_path: exe.into(),
+            install_dir: dir.into(),
+            cover_image_url: String::new(),
+            version: String::new(),
+            playtime_minutes: 0,
+            category: Category::Installed,
+            added_at: String::new(),
+            last_played_at: None,
+            session_count: 0,
+            exe_missing: false,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detections_already_in_library_are_filtered() {
+        let (dirs, exes) = library_keys(&[
+            game(r"D:\Jeux\Hades", r"D:\Jeux\Hades\x64\Hades.exe"),
+            game(r"D:\Jeux\Other\bin", r"D:\Jeux\Other\bin\o.exe"),
+            game(r"D:\Jeux\Steam", r"D:\Jeux\Steam\steam.exe"),
+        ]);
+        let d = |dir: &str, exe: &str| Detected {
+            key: detect::key_for(Path::new(dir)),
+            title: "x".into(),
+            executable_path: exe.into(),
+            install_dir: dir.into(),
+            source: "folder".into(),
+        };
+        assert!(in_library(
+            &d(r"d:\jeux\hades", r"D:\Jeux\Hades\x64\Hades.exe"),
+            &dirs,
+            &exes
+        ));
+        // Library entry points inside the detected folder.
+        assert!(in_library(
+            &d(r"D:\Jeux\Other", r"D:\Jeux\Other\o.exe"),
+            &dirs,
+            &exes
+        ));
+        // A game inside a launcher folder that is in the library is still new.
+        assert!(!in_library(
+            &d(
+                r"D:\Jeux\Steam\steamapps\common\Portal",
+                r"D:\Jeux\Steam\steamapps\common\Portal\portal.exe"
+            ),
+            &dirs,
+            &exes
+        ));
+    }
+
+    #[test]
+    fn detection_pass_stores_new_games_once() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("Jeux");
+        std::fs::create_dir_all(root.join("Neon")).unwrap();
+        std::fs::write(root.join("Neon").join("neon.exe"), b"x").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let paths = vec![root.to_string_lossy().into_owned()];
+        let first = detection_pass(&db, &paths).unwrap();
+        assert!(first.iter().any(|d| d.title == "Neon"));
+        // Second pass: already known, nothing new to notify.
+        let second = detection_pass(&db, &paths).unwrap();
+        assert!(second.iter().all(|d| d.title != "Neon"));
+    }
 
     #[cfg(windows)]
     #[test]

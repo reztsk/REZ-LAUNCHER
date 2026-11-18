@@ -1,8 +1,11 @@
 name: Release
 
-# Publie une release GitHub avec l'installateur Windows de GameREZ.
-#   git tag v0.1.0 && git push origin v0.1.0
+# Publie une release GitHub avec l'installateur Windows de REZ launcher
+# + le manifeste signé `latest.json` utilisé par la mise à jour automatique.
+#   git tag v0.2.0 && git push origin v0.2.0
 # ou bouton « Run workflow » (onglet Actions) : utilise la version de tauri.conf.json.
+#
+# Secret requis : TAURI_SIGNING_PRIVATE_KEY (clé privée minisign, voir README).
 on:
   push:
     tags: ["v*"]
@@ -44,30 +47,24 @@ jobs:
       - run: npm ci
       - run: npm test
 
-      - name: Build + publication de la release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build (installateur + signature de mise à jour)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
-          releaseName: GameREZ v__VERSION__
-          releaseDraft: false
-          prerelease: false
-          releaseBody: |
-            ## Télécharger
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: npm run tauri build
 
-            - **`GameREZ_${{ steps.version.outputs.version }}_x64-setup.exe`** : installateur Windows (recommandé). Installe GameREZ pour ton compte (sans droits admin) et crée un raccourci sur le bureau + dans le menu Démarrer.
-            - **`GameREZ_${{ steps.version.outputs.version }}_x64_portable.exe`** : version portable, rien à installer (WebView2 requis, déjà présent sur Windows 10/11 à jour).
+      - name: Préparer les fichiers de la release
+        run: node scripts/release-assets.mjs
 
-            Windows SmartScreen peut afficher « Windows a protégé votre ordinateur » car l'exe n'est pas signé : clique sur *Informations complémentaires* puis *Exécuter quand même*.
-
-            GameREZ ne touche jamais aux fichiers ni à la mémoire des jeux : zéro risque de ban.
-
-      - name: Ajouter l'exe portable
+      - name: Publier la release GitHub
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v="${{ steps.version.outputs.version }}"
-          cp src-tauri/target/release/GameREZ.exe "GameREZ_${v}_x64_portable.exe"
-          gh release upload "v$v" "GameREZ_${v}_x64_portable.exe" --clobber
+          if gh release view "v$v" >/dev/null 2>&1; then
+            gh release upload "v$v" release-out/assets/* --clobber
+            gh release edit "v$v" --title "REZ launcher v$v" --notes-file release-out/notes.md --draft=false --latest
+          else
+            gh release create "v$v" release-out/assets/* --title "REZ launcher v$v" \
+              --notes-file release-out/notes.md --target "$GITHUB_SHA" --latest
+          fi

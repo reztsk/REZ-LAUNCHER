@@ -28,15 +28,28 @@ export interface ModalHandle {
 }
 
 let current: ModalHandle | null = null;
+const waiting: (() => void)[] = [];
+
+/** Run `cb` now if no modal is open, otherwise right after the open one closes.
+ *  Background pop-ups (updates, detected games) never interrupt the user. */
+export function whenNoModal(cb: () => void): void {
+  if (!current) cb();
+  else waiting.push(cb);
+}
 
 /** Open a modal with trusted HTML content. Returns a handle to wire events / close. */
-export function openModal(title: string, contentHtml: string, onClose?: () => void): ModalHandle {
+export function openModal(
+  title: string,
+  contentHtml: string,
+  onClose?: () => void,
+  opts: { wide?: boolean; dismissable?: boolean } = {},
+): ModalHandle {
   current?.close();
   const root = document.getElementById("modal-root")!;
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.innerHTML = `
-    <div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="modal ${opts.wide ? "wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
       <div class="flex items-center justify-between px-6 pt-5">
         <h2 class="font-display text-lg font-bold tracking-tight">${esc(title)}</h2>
         <button class="opt-toggle" data-close title="Fermer">${icon.x}</button>
@@ -46,12 +59,15 @@ export function openModal(title: string, contentHtml: string, onClose?: () => vo
   root.appendChild(backdrop);
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") handle.close();
+    if (e.key === "Escape" && opts.dismissable !== false) handle.close();
   };
   const handle: ModalHandle = {
     el: backdrop,
     close: () => {
       if (current === handle) current = null;
+      setTimeout(() => {
+        if (!current) waiting.shift()?.();
+      }, 220);
       document.removeEventListener("keydown", onKey);
       backdrop.classList.add("closing");
       setTimeout(() => backdrop.remove(), 190);
@@ -59,7 +75,7 @@ export function openModal(title: string, contentHtml: string, onClose?: () => vo
     },
   };
   backdrop.addEventListener("mousedown", (e) => {
-    if (e.target === backdrop) handle.close();
+    if (e.target === backdrop && opts.dismissable !== false) handle.close();
   });
   backdrop.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => handle.close()));
   document.addEventListener("keydown", onKey);

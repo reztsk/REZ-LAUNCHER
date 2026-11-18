@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "GameREZ",
-  "version": "0.1.0",
-  "identifier": "io.github.gamerez",
-  "mainBinaryName": "GameREZ",
+  "productName": "REZ launcher",
+  "version": "0.2.0",
+  "identifier": "io.github.rezlauncher",
+  "mainBinaryName": "REZ-launcher",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -14,13 +14,13 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "GameREZ",
+        "title": "REZ launcher",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
         "minHeight": 600,
         "center": true,
-        "backgroundColor": "#07070d",
+        "backgroundColor": "#09090b",
         "theme": "Dark"
       }
     ],
@@ -39,10 +39,10 @@
     "targets": [
       "nsis"
     ],
-    "publisher": "GameREZ contributors",
+    "publisher": "REZ launcher contributors",
     "category": "Game",
     "shortDescription": "Open-source game launcher & playtime tracker",
-    "longDescription": "GameREZ is an ultra-light, open-source PC game launcher that tracks your exact playtime and helps you keep your drives tidy.",
+    "longDescription": "REZ launcher is an ultra-light, open-source PC game launcher that tracks your exact playtime per game and helps you keep your drives tidy.",
     "copyright": "MIT License",
     "icon": [
       "icons/32x32.png",
@@ -67,6 +67,18 @@
         ],
         "displayLanguageSelector": false,
         "compression": "lzma"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI5NzgwMzA3RjIzMUU1NzYKUldSMjVUSHlCd040S2QyUmIwK21wbFIvaDU2aVFpWDFTVmhFREkrN01BTTJuVTdFUmp5SkwzMnoK",
+      "endpoints": [
+        "https://github.com/reztsk/GameREZ/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

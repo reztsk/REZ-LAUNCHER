@@ -2,9 +2,10 @@
 //!
 //! `playtime_minutes` is always derived from the `sessions` table (sum of exact
 //! durations in seconds), so it never drifts through rounding. Sessions are
-//! heart-beaten while a game runs, which makes playtime crash-safe: if GameREZ
+//! heart-beaten while a game runs, which makes playtime crash-safe: if REZ launcher
 //! or the PC dies mid-session, the time up to the last heartbeat is kept.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -52,6 +53,8 @@ pub struct Game {
     pub category: Category,
     pub added_at: String,
     pub last_played_at: Option<String>,
+    /// Number of recorded play sessions for this game.
+    pub session_count: i64,
     /// Computed at read time: the executable is set but not found on disk.
     pub exe_missing: bool,
 }
@@ -125,7 +128,9 @@ pub struct Database {
 }
 
 const GAME_COLUMNS: &str = "id, title, executable_path, install_dir, cover_image_url, version, \
-                            playtime_minutes, category, added_at, last_played_at";
+                            playtime_minutes, category, added_at, last_played_at, \
+                            (SELECT COUNT(*) FROM sessions s WHERE s.game_id = games.id \
+                             AND s.duration_seconds > 0) AS session_count";
 
 fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
     let category: String = row.get(7)?;
@@ -142,6 +147,7 @@ fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
         category: Category::parse(&category).unwrap_or(Category::NotInstalled),
         added_at: row.get(8)?,
         last_played_at: row.get(9)?,
+        session_count: row.get(10)?,
         exe_missing,
     })
 }
@@ -191,7 +197,24 @@ impl Database {
                  duration_seconds INTEGER NOT NULL DEFAULT 0,
                  active           INTEGER NOT NULL DEFAULT 1
              );
-             CREATE INDEX IF NOT EXISTS idx_sessions_game ON sessions(game_id);",
+             CREATE INDEX IF NOT EXISTS idx_sessions_game ON sessions(game_id);
+
+             CREATE TABLE IF NOT EXISTS settings (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+
+             -- Games found on disk by the (read-only) detector and the user's
+             -- answer: 'pending' | 'seen' | 'ignored' | 'added'.
+             CREATE TABLE IF NOT EXISTS detections (
+                 key             TEXT PRIMARY KEY,
+                 title           TEXT NOT NULL,
+                 executable_path TEXT NOT NULL,
+                 install_dir     TEXT NOT NULL,
+                 source          TEXT NOT NULL,
+                 status          TEXT NOT NULL,
+                 first_seen      TEXT NOT NULL
+             );",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -371,11 +394,180 @@ impl Database {
             |r| r.get(0),
         )?)
     }
+
+    // ------------------------------------------------------------ settings
+
+    pub fn get_setting(&self, key: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
+        self.conn().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------- detections
+
+    /// `key -> status` for every game the detector has already seen.
+    pub fn detection_statuses(&self) -> AppResult<HashMap<String, String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT key, status FROM detections")?;
+        let map = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Ok(map)
+    }
+
+    /// Record newly found games. Never overrides an existing answer.
+    pub fn insert_detections(&self, found: &[Detected], status: &str) -> AppResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO detections
+                     (key, title, executable_path, install_dir, source, status, first_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            let now = now_rfc3339();
+            for d in found {
+                stmt.execute(params![
+                    d.key,
+                    d.title,
+                    d.executable_path,
+                    d.install_dir,
+                    d.source,
+                    status,
+                    now
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn detections_with_status(&self, statuses: &[&str]) -> AppResult<Vec<Detected>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT key, title, executable_path, install_dir, source, status
+             FROM detections ORDER BY title COLLATE NOCASE",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((row_to_detected(r)?, r.get::<_, String>(5)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, st)| statuses.contains(&st.as_str()))
+            .map(|(d, _)| d)
+            .collect())
+    }
+
+    pub fn get_detection(&self, key: &str) -> AppResult<Option<Detected>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT key, title, executable_path, install_dir, source
+                 FROM detections WHERE key = ?1",
+                [key],
+                row_to_detected,
+            )
+            .optional()?)
+    }
+
+    pub fn set_detection_status(&self, keys: &[String], status: &str) -> AppResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for k in keys {
+            tx.execute(
+                "UPDATE detections SET status = ?1 WHERE key = ?2",
+                params![status, k],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// "Ignored" games become proposable again. Returns how many were reset.
+    pub fn reset_ignored_detections(&self) -> AppResult<usize> {
+        Ok(self.conn().execute(
+            "UPDATE detections SET status = 'seen' WHERE status = 'ignored'",
+            [],
+        )?)
+    }
+
+    /// Every local cover path still referenced by a game.
+    pub fn cover_paths(&self) -> AppResult<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT cover_image_url FROM games WHERE cover_image_url <> ''")?;
+        let v = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(v)
+    }
+}
+
+/// A game found on disk by the detector (see `detect.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Detected {
+    /// Normalized install folder: identity of the detection.
+    pub key: String,
+    pub title: String,
+    pub executable_path: String,
+    pub install_dir: String,
+    /// "steam" | "epic" | "gog" | "folder"
+    pub source: String,
+}
+
+fn row_to_detected(r: &Row<'_>) -> rusqlite::Result<Detected> {
+    Ok(Detected {
+        key: r.get(0)?,
+        title: r.get(1)?,
+        executable_path: r.get(2)?,
+        install_dir: r.get(3)?,
+        source: r.get(4)?,
+    })
+}
+
+/// One-time import of the data stored under the app's former name (GameREZ,
+/// `io.github.gamerez`): consistent copy of the database + local covers.
+/// The old folder is left untouched. Returns true if something was migrated.
+pub fn migrate_legacy(old_dir: &Path, new_dir: &Path) -> AppResult<bool> {
+    let old_db = old_dir.join("gamerez.sqlite3");
+    let new_db = db_path(new_dir);
+    if new_db.exists() || !old_db.is_file() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(new_dir)?;
+    Connection::open(&old_db)?.execute("VACUUM INTO ?1", [new_db.to_string_lossy()])?;
+    let old_covers = old_dir.join("covers");
+    let new_covers = new_dir.join("covers");
+    if old_covers.is_dir() {
+        std::fs::create_dir_all(&new_covers)?;
+        for entry in std::fs::read_dir(&old_covers)?.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_file()) {
+                std::fs::copy(entry.path(), new_covers.join(entry.file_name()))?;
+            }
+        }
+        Connection::open(&new_db)?.execute(
+            "UPDATE games SET cover_image_url = replace(cover_image_url, ?1, ?2)",
+            params![old_covers.to_string_lossy(), new_covers.to_string_lossy()],
+        )?;
+    }
+    Ok(true)
 }
 
 /// Default database location inside the OS app-data directory.
 pub fn db_path(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("gamerez.sqlite3")
+    app_data_dir.join("rez-launcher.sqlite3")
 }
 
 #[cfg(test)]
@@ -493,6 +685,83 @@ mod tests {
         assert_eq!(g.playtime_minutes, 60);
         assert_eq!(g.last_played_at.as_deref(), Some("2026-01-01T11:00:00Z"));
         assert_eq!(db.recover_sessions().unwrap(), 0);
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.get_setting("k").unwrap(), None);
+        db.set_setting("k", "1").unwrap();
+        db.set_setting("k", "2").unwrap();
+        assert_eq!(db.get_setting("k").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn detections_lifecycle() {
+        let db = Database::open_in_memory().unwrap();
+        let d = |k: &str| Detected {
+            key: k.into(),
+            title: k.to_uppercase(),
+            executable_path: format!(r"D:\Jeux\{k}\{k}.exe"),
+            install_dir: format!(r"D:\Jeux\{k}"),
+            source: "folder".into(),
+        };
+        db.insert_detections(&[d("a"), d("b")], "pending").unwrap();
+        db.set_detection_status(&["a".into()], "ignored").unwrap();
+        // Re-detection never overrides the user's answer.
+        db.insert_detections(&[d("a")], "pending").unwrap();
+        let st = db.detection_statuses().unwrap();
+        assert_eq!(st["a"], "ignored");
+        assert_eq!(st["b"], "pending");
+        assert_eq!(
+            db.detections_with_status(&["pending"]).unwrap(),
+            vec![d("b")]
+        );
+        assert_eq!(db.reset_ignored_detections().unwrap(), 1);
+        assert_eq!(db.detection_statuses().unwrap()["a"], "seen");
+        assert_eq!(db.get_detection("b").unwrap(), Some(d("b")));
+    }
+
+    #[test]
+    fn session_count_ignores_empty_sessions() {
+        let db = Database::open_in_memory().unwrap();
+        let g = db
+            .insert_game(input("G", r"D:\Jeux\G\g.exe", Category::Installed))
+            .unwrap();
+        let s1 = db.start_session(g.id, "2026-01-01T10:00:00Z").unwrap();
+        db.finish_session(s1, "2026-01-01T11:00:00Z", 3600).unwrap();
+        let s2 = db.start_session(g.id, "2026-01-02T10:00:00Z").unwrap();
+        let g = db.finish_session(s2, "2026-01-02T10:00:00Z", 0).unwrap();
+        assert_eq!(g.session_count, 1);
+        assert_eq!(g.playtime_minutes, 60);
+    }
+
+    #[test]
+    fn migrates_legacy_gamerez_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("io.github.gamerez");
+        let new = tmp.path().join("io.github.rezlauncher");
+        std::fs::create_dir_all(old.join("covers")).unwrap();
+        std::fs::write(old.join("covers").join("cover-1.png"), b"png").unwrap();
+        {
+            let legacy = Database::open(&old.join("gamerez.sqlite3")).unwrap();
+            let mut i = input("Old", r"D:\Jeux\Old\old.exe", Category::Installed);
+            i.cover_image_url = old
+                .join("covers")
+                .join("cover-1.png")
+                .to_string_lossy()
+                .into_owned();
+            legacy.insert_game(i).unwrap();
+        }
+        assert!(migrate_legacy(&old, &new).unwrap());
+        assert!(!migrate_legacy(&old, &new).unwrap()); // only once
+        let db = Database::open(&db_path(&new)).unwrap();
+        let games = db.list_games().unwrap();
+        assert_eq!(games.len(), 1);
+        let cover = PathBuf::from(&games[0].cover_image_url);
+        assert!(cover.starts_with(new.join("covers")));
+        assert!(cover.is_file());
+        assert!(old.join("gamerez.sqlite3").is_file()); // old data untouched
     }
 
     #[test]

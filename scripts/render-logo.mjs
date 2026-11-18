@@ -1,4 +1,4 @@
-// GameREZ brand assets — single source of truth.
+// REZ launcher brand assets — single source of truth.
 // Generates the SVG logos, high-res PNGs and the installer bitmap:
 //   node scripts/render-logo.mjs
 // Then refresh the app icons with:  npx tauri icon assets/logo-mark-1024.png
@@ -82,26 +82,34 @@ const container = (p) => `
 
 const markSvg = () =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <title>GameREZ</title>${defs("m")}${container("m")}${emblem("m")}
+  <title>REZ launcher</title>${defs("m")}${container("m")}${emblem("m")}
 </svg>
 `;
 
 const markTransparentSvg = () =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 40 432 432" width="432" height="432">
-  <title>GameREZ mark</title>${defs("t")}${emblem("t")}
+  <title>REZ launcher mark</title>${defs("t")}${emblem("t")}
 </svg>
 `;
 
-// Wordmark letters (stroked, no font needed), 80 units tall.
-const GAME = `
-      <path d="M50 6 L14 6 L6 14 L6 66 L14 74 L50 74 L50 42 L30 42"/>
-      <path transform="translate(76 0)" d="M6 74 L6 22 L22 6 L34 6 L50 22 L50 74 M6 46 L50 46"/>
-      <path transform="translate(152 0)" d="M6 74 L6 6 L28 32 L50 6 L50 74"/>
-      <path transform="translate(228 0)" d="M50 6 L6 6 L6 74 L50 74 M6 40 L40 40"/>`;
+// Wordmark letters (stroked, no font needed), 80 units tall, 56 wide, 76 pitch.
 const REZ = `
       <path d="M6 74 L6 6 L42 6 L50 14 L50 32 L42 40 L6 40 M30 40 L50 74"/>
       <path d="M126 6 L82 6 L82 74 L126 74 M82 40 L116 40"/>
       <path d="M158 6 L202 6 L158 74 L202 74"/>`;
+const LETTERS = {
+  L: "M6 6 L6 74 L50 74",
+  A: "M6 74 L6 22 L22 6 L34 6 L50 22 L50 74 M6 46 L50 46",
+  U: "M6 6 L6 58 L22 74 L34 74 L50 58 L50 6",
+  N: "M6 74 L6 6 L50 74 L50 6",
+  C: "M50 6 L14 6 L6 14 L6 66 L14 74 L50 74",
+  H: "M6 6 L6 74 M50 6 L50 74 M6 40 L50 40",
+  E: "M50 6 L6 6 L6 74 L50 74 M6 40 L40 40",
+  R: "M6 74 L6 6 L42 6 L50 14 L50 32 L42 40 L6 40 M30 40 L50 74",
+};
+const LAUNCHER = [..."LAUNCHER"]
+  .map((c, i) => `\n      <path transform="translate(${i * 76} 0)" d="${LETTERS[c]}"/>`)
+  .join("");
 const wordDefs = (p) => `
     <linearGradient id="${p}wm" x1="0" y1="0" x2="208" y2="80" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffffff"/><stop offset="0.6" stop-color="#d4d4d8"/><stop offset="1" stop-color="#9f9fa8"/>
@@ -112,23 +120,24 @@ const wordDefs = (p) => `
       <feComposite in2="b" operator="in" result="g"/>
       <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>`;
-const wordmark = (p, game = "#8a8a93") => `
-    <g fill="none" stroke-width="12" stroke-linejoin="miter" stroke-linecap="butt">
-      <g stroke="${game}">${GAME}
+// Stacked lockup, 208 × 141 units: REZ (metal) / rule / LAUNCHER (steel grey).
+const wordmark = (p, sub = "#8a8a93") => `
+    <g fill="none" stroke-linejoin="miter" stroke-linecap="butt">
+      <g stroke="url(#${p}wm)" stroke-width="12" filter="url(#${p}wglow)">${REZ}
       </g>
-      <g transform="translate(304 0)" stroke="url(#${p}wm)" filter="url(#${p}wglow)">${REZ}
+      <path d="M0 96 H208" stroke="#3f3f46" stroke-width="2"/>
+      <path d="M0 96 H56" stroke="#a1a1aa" stroke-width="2"/>
+      <g transform="translate(0 112) scale(0.3537)" stroke="${sub}" stroke-width="15" stroke-miterlimit="2">${LAUNCHER}
       </g>
     </g>`;
 
 const horizontalSvg = () =>
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1460 400" width="1460" height="400">
-  <title>GameREZ</title>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400">
+  <title>REZ launcher</title>
   <defs>${wordDefs("h")}</defs>
   <svg x="30" y="30" width="340" height="340" viewBox="0 0 512 512">${defs("h")}${container("h")}${emblem("h")}
   </svg>
-  <g transform="translate(430 128) scale(1.8)">${wordmark("h")}
-    <path d="M0 98 H512" stroke="#3f3f46" stroke-width="2"/>
-    <path d="M0 98 H120" stroke="#a1a1aa" stroke-width="2"/>
+  <g transform="translate(440 46) scale(2.2)">${wordmark("h")}
   </g>
 </svg>
 `;
@@ -146,12 +155,10 @@ const installerSidebarSvg = () =>
   </defs>
   <rect width="164" height="314" fill="url(#sbg)"/>
   <rect width="164" height="314" fill="url(#sgrid)"/>
-  <svg x="27" y="58" width="110" height="110" viewBox="0 0 512 512">${defs("s")}${container("s")}${emblem("s")}
+  <svg x="27" y="50" width="110" height="110" viewBox="0 0 512 512">${defs("s")}${container("s")}${emblem("s")}
   </svg>
-  <g transform="translate(22 196) scale(0.234)">${wordmark("s")}
+  <g transform="translate(22 184) scale(0.577)">${wordmark("s")}
   </g>
-  <path d="M22 226 H142" stroke="#3f3f46" stroke-width="1"/>
-  <path d="M22 226 H55" stroke="#a1a1aa" stroke-width="1"/>
   <g fill="#52525b"><rect x="19" y="290" width="4" height="4"/><rect x="27" y="290" width="4" height="4"/><rect x="35" y="290" width="4" height="4" fill="#a1a1aa"/></g>
 </svg>
 `;
@@ -172,8 +179,8 @@ const render = (svg, width, background) =>
 const pngs = [
   ["assets/logo-mark-1024.png", svgs["assets/logo-mark.svg"], 1024],
   ["assets/logo-mark-transparent-1024.png", svgs["assets/logo-mark-transparent.svg"], 1024],
-  ["assets/logo-horizontal.png", svgs["assets/logo-horizontal.svg"], 2920],
-  ["assets/logo-horizontal-dark.png", svgs["assets/logo-horizontal.svg"], 2920, "#09090b"],
+  ["assets/logo-horizontal.png", svgs["assets/logo-horizontal.svg"], 1920],
+  ["assets/logo-horizontal-dark.png", svgs["assets/logo-horizontal.svg"], 1920, "#09090b"],
 ];
 for (const [out, svg, width, bg] of pngs) {
   const png = render(svg, width, bg).asPng();

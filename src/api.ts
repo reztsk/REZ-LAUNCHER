@@ -15,6 +15,8 @@ export interface Game {
   category: Category;
   added_at: string;
   last_played_at: string | null;
+  /** Recorded play sessions for this game. */
+  session_count: number;
   exe_missing: boolean;
 }
 
@@ -61,6 +63,49 @@ export interface DriveInfo {
   removable: boolean;
 }
 
+export type CardSize = "compact" | "normal" | "large";
+export type StartView = "library" | "launchers";
+
+export interface Settings {
+  card_size: CardSize;
+  animations: boolean;
+  tilt: boolean;
+  ambient: boolean;
+  check_updates_on_start: boolean;
+  detect_new_games: boolean;
+  search_paths: string[];
+  start_view: StartView;
+  launch_at_startup: boolean;
+}
+
+/** A game found on disk by the read-only detector. */
+export interface Detected {
+  key: string;
+  title: string;
+  executable_path: string;
+  install_dir: string;
+  source: "steam" | "epic" | "gog" | "folder";
+}
+
+export type DetectionAction = "add" | "ignore" | "later";
+
+export interface UpdateInfo {
+  version: string;
+  current_version: string;
+  notes: string;
+  date: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+export interface CacheReport {
+  files_removed: number;
+  bytes_freed: number;
+}
+
 const tauriApi = {
   listGames: () => invoke<Game[]>("list_games"),
   addGame: (input: GameInput) => invoke<Game>("add_game", { input }),
@@ -75,6 +120,19 @@ const tauriApi = {
   openLauncherDownload: (id: string) => invoke<void>("open_launcher_download", { id }),
   listDrives: () => invoke<DriveInfo[]>("list_drives"),
   createFolder: (path: string) => invoke<string>("create_folder", { path }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
+  pickFolder: () => invoke<string | null>("pick_folder"),
+  pendingDetections: () => invoke<Detected[]>("pending_detections"),
+  scanGamesNow: () => invoke<Detected[]>("scan_games_now"),
+  resolveDetections: (keys: string[], action: DetectionAction) =>
+    invoke<Game[]>("resolve_detections", { keys, action }),
+  resetIgnoredDetections: () => invoke<number>("reset_ignored_detections"),
+  clearCache: () => invoke<CacheReport>("clear_cache"),
+  openDataDir: () => invoke<void>("open_data_dir"),
+  openRepo: () => invoke<void>("open_repo"),
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
 };
 
 const tauriEvents = {
@@ -82,6 +140,10 @@ const tauriEvents = {
     listen<RunningGame>("game-started", (e) => cb(e.payload)),
   onGameStopped: (cb: (p: GameStopped) => void): Promise<UnlistenFn> =>
     listen<GameStopped>("game-stopped", (e) => cb(e.payload)),
+  onGamesDetected: (cb: (p: Detected[]) => void): Promise<UnlistenFn> =>
+    listen<Detected[]>("games-detected", (e) => cb(e.payload)),
+  onUpdateProgress: (cb: (p: UpdateProgress) => void): Promise<UnlistenFn> =>
+    listen<UpdateProgress>("update-progress", (e) => cb(e.payload)),
 };
 
 export type Api = typeof tauriApi;

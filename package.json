@@ -1,9 +1,9 @@
 {
-  "name": "gamerez",
+  "name": "rez-launcher",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "GameREZ — open-source, ultra-light desktop game launcher & playtime tracker (Tauri v2).",
+  "description": "REZ launcher — open-source, ultra-light desktop game launcher & playtime tracker (Tauri v2).",
   "license": "MIT",
   "scripts": {
     "dev": "vite",

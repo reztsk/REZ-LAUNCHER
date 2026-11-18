@@ -99,7 +99,7 @@ export function guideFor(launcherId: string, launcherName: string, folder: strin
     steps.push({ title: "Bibliothèque de jeux", body: tips.libraryTip });
   }
   steps.push({
-    title: "Ajoute-le à GameREZ",
+    title: "Ajoute-le à REZ launcher",
     body: "Relance la détection : le launcher apparaîtra comme « Détecté » et tu pourras l'ajouter à ta bibliothèque en un clic.",
     action: { kind: "rescan" },
   });

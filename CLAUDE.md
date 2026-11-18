@@ -1,4 +1,4 @@
-# Project: GameREZ (launcher de jeux PC open source)
+# Project: REZ launcher (launcher de jeux PC open source)
 
 ## Stack Technique
 - **Backend / Core:** Rust (Tauri v2, `tokio`, `rusqlite` ou `sqlx`, `sysinfo` pour le suivi des processus).

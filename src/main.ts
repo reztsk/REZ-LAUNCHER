@@ -1,16 +1,21 @@
 import "./styles.css";
 import { api, events, coverSrc, isTauri, installMock } from "./api";
-import type { Category, DriveInfo, Game, GameInput, LauncherInfo, RunningGame, ScannedExe } from "./api";
+import type { Category, Detected, DriveInfo, Game, GameInput, LauncherInfo, RunningGame, ScannedExe, Settings } from "./api";
+import { showDetections } from "./detection";
 import { esc, formatBytes, formatClock, formatPlaytime, formatRelative, formatSession, hueFrom, initials } from "./format";
+import { openGuide } from "./guide-modal";
 import { guideFor } from "./guides";
 import { icon } from "./icons";
+import { launcherLogo } from "./launcher-logos";
+import { renderSettings } from "./settings-view";
 import { confirmModal, errorToast, openModal, toast } from "./ui";
+import { checkForUpdates, onUpdateStatus } from "./updates";
 
-type View = "library" | "launchers";
+type View = "library" | "launchers" | "settings";
 type Filter = "all" | Category;
 type Sort = "title" | "playtime" | "recent";
 
-const LS_KEY = "gamerez.ui.v1";
+const LS_KEY = "rez.ui.v1";
 
 interface Persisted {
   filter: Filter;
@@ -28,6 +33,18 @@ function loadPersisted(): Persisted {
   }
 }
 
+const DEFAULT_SETTINGS: Settings = {
+  card_size: "normal",
+  animations: true,
+  tilt: true,
+  ambient: true,
+  check_updates_on_start: true,
+  detect_new_games: true,
+  search_paths: [],
+  start_view: "library",
+  launch_at_startup: false,
+};
+
 const persisted = loadPersisted();
 const state = {
   view: "library" as View,
@@ -41,9 +58,10 @@ const state = {
   launchers: null as LauncherInfo[] | null,
   drives: [] as DriveInfo[],
   drive: persisted.drive,
-  guideOpen: null as string | null,
   guideDone: persisted.guideDone,
   launching: new Set<number>(),
+  settings: { ...DEFAULT_SETTINGS } as Settings,
+  updateAvailable: false,
 };
 
 function persist(): void {
@@ -68,8 +86,33 @@ const CATEGORY_LABEL: Record<Category, string> = {
 
 function withTransition(fn: () => void): void {
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
-  if (doc.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(fn);
+  const reduced = !state.settings.animations || matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (doc.startViewTransition && !reduced) doc.startViewTransition(fn);
   else fn();
+}
+
+/* ============================== Settings ============================== */
+
+function applyVisualPrefs(s: Settings): void {
+  const root = document.documentElement;
+  root.dataset.cards = s.card_size;
+  root.classList.toggle("no-anim", !s.animations);
+  root.classList.toggle("no-tilt", !s.tilt);
+  root.classList.toggle("no-ambient", !s.ambient);
+}
+
+async function saveSettings(patch: Partial<Settings>): Promise<void> {
+  const prev = state.settings;
+  state.settings = { ...prev, ...patch };
+  applyVisualPrefs(state.settings);
+  try {
+    state.settings = await api.saveSettings(state.settings);
+    applyVisualPrefs(state.settings);
+  } catch (err) {
+    state.settings = prev;
+    applyVisualPrefs(prev);
+    throw err;
+  }
 }
 
 /* ============================== Shell ============================== */
@@ -80,24 +123,25 @@ function renderShell(): void {
       <div class="flex items-center gap-3 px-2">
         <img src="/logo-mark.svg" alt="" class="h-10 w-10 drop-shadow-[0_0_12px_rgba(255,255,255,0.25)]" />
         <div class="leading-none">
-          <div class="font-display text-[22px] font-black tracking-[0.12em]">GAME<span class="text-grad">REZ</span></div>
-          <div class="mt-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-muted">Launcher</div>
+          <div class="font-display text-[24px] font-black tracking-[0.14em] text-grad">REZ</div>
+          <div class="mt-1 text-[10px] font-semibold uppercase tracking-[0.42em] text-muted">Launcher</div>
         </div>
       </div>
 
       <nav class="mt-9 flex flex-col gap-1 px-[14px]">
         <button class="nav-btn" data-nav="library">${icon.grid}<span class="flex-1 text-left">Bibliothèque</span><span id="nav-count" class="text-xs text-muted"></span></button>
         <button class="nav-btn" data-nav="launchers">${icon.rocket}<span class="flex-1 text-left">Launchers</span></button>
+        <button class="nav-btn" data-nav="settings">${icon.settings}<span class="flex-1 text-left">Paramètres</span><i id="nav-update" class="nav-dot hidden" title="Mise à jour disponible"></i></button>
       </nav>
 
-      <div id="side-stats" class="glass mx-1 mt-8 rounded-2xl p-4"></div>
+      <div id="side-live" class="mx-1 mt-8"></div>
 
       <div class="mt-auto px-2">
         <div class="flex items-start gap-2.5 rounded-xl border border-white/5 bg-white/[0.02] p-3 text-[11.5px] leading-snug text-muted">
-          <span class="mt-0.5 text-emerald-400">${icon.shield}</span>
-          <span><b class="text-white/80">Zéro risque de ban.</b> GameREZ lance tes jeux comme un raccourci et chronomètre le processus. Aucune injection, aucun fichier de jeu modifié.</span>
+          <span class="mt-0.5 text-white/80">${icon.shield}</span>
+          <span><b class="text-white/85">Zéro risque de ban.</b> REZ launcher lance tes jeux comme un raccourci et chronomètre le processus. Aucune injection, aucun fichier de jeu modifié.</span>
         </div>
-        <p class="mt-3 text-center text-[11px] text-white/25">Open source · v0.1.0</p>
+        <p class="mt-3 text-center text-[11px] text-white/25">Open source · v${esc(__APP_VERSION__)}</p>
       </div>
     </aside>
     <main id="view" class="relative h-full overflow-y-auto"></main>`;
@@ -107,38 +151,46 @@ function renderShell(): void {
   );
 }
 
+/** Sidebar: navigation + games running right now (no global playtime total). */
 function renderSidebar(): void {
   document.querySelectorAll<HTMLElement>("[data-nav]").forEach((b) => {
     if (b.dataset.nav === state.view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
-  const games = state.games.filter((g) => g.category !== "launcher");
-  $("#nav-count")!.textContent = String(games.length);
-  const total = games.reduce((s, g) => s + g.playtime_minutes, 0);
-  const top = [...games].sort((a, b) => b.playtime_minutes - a.playtime_minutes)[0];
-  const live = state.running.size;
-  $("#side-stats")!.innerHTML = `
-    <p class="label !mb-1">Temps de jeu total</p>
-    <p class="font-display text-[26px] font-bold tracking-tight">${formatPlaytime(total)}</p>
-    <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
-      <div class="rounded-lg bg-white/[0.03] p-2"><p class="text-muted">Jeux</p><p class="mt-0.5 text-sm font-semibold">${games.length}</p></div>
-      <div class="rounded-lg bg-white/[0.03] p-2"><p class="text-muted">En cours</p><p class="mt-0.5 text-sm font-semibold ${live ? "text-cyan-300" : ""}">${live}</p></div>
-    </div>
-    ${
-      top && top.playtime_minutes > 0
-        ? `<p class="mt-3 truncate text-xs text-muted">Le plus joué : <span class="text-white/85">${esc(top.title)}</span></p>`
-        : ""
-    }`;
+  $("#nav-count")!.textContent = String(state.games.filter((g) => g.category !== "launcher").length);
+  $("#nav-update")!.classList.toggle("hidden", !state.updateAvailable);
+  const live = [...state.running.values()]
+    .map((r) => ({ r, g: state.games.find((g) => g.id === r.game_id) }))
+    .filter((x): x is { r: RunningGame; g: Game } => !!x.g);
+  $("#side-live")!.innerHTML = live.length
+    ? `<div class="glass rounded-2xl p-3">
+        <p class="label !mb-2 flex items-center gap-2"><i class="nav-dot"></i>En cours</p>
+        ${live
+          .map(
+            ({ r, g }) => `
+          <div class="flex items-center justify-between gap-2 rounded-lg bg-white/[0.03] px-2.5 py-2 text-xs">
+            <span class="truncate font-semibold">${esc(g.title)}</span>
+            <b class="tabular-nums" data-since="${esc(r.started_at)}">0:00</b>
+          </div>`,
+          )
+          .join("")}
+      </div>`
+    : "";
+  tickTimers();
+}
+
+function renderView(): void {
+  if (state.view === "library") renderLibrary();
+  else if (state.view === "launchers") renderLaunchers();
+  else renderSettingsView();
 }
 
 function switchView(view: View): void {
   if (view === state.view && $("#view")!.childElementCount) return;
   state.view = view;
   renderSidebar();
-  withTransition(() => {
-    if (view === "library") renderLibrary();
-    else renderLaunchers();
-  });
+  $("#view")!.scrollTop = 0;
+  withTransition(renderView);
 }
 
 /* ============================== Library ============================== */
@@ -171,7 +223,7 @@ function renderLibrary(): void {
       <header class="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 class="font-display text-[34px] font-bold tracking-tight">Bibliothèque</h1>
-          <p class="mt-1 text-sm text-muted">Tous tes jeux, un seul endroit. Le temps de jeu est mesuré à la seconde près.</p>
+          <p class="mt-1 text-sm text-muted">Tous tes jeux, un seul endroit. Le temps de chaque jeu est mesuré à la seconde près.</p>
         </div>
         <div class="flex items-center gap-2.5">
           <label class="relative">
@@ -270,11 +322,14 @@ function renderTabs(): void {
   );
 }
 
+/** Monochrome generated cover: steel gradient + grid + metal initials. */
 function generatedCover(title: string): string {
   const h = hueFrom(title);
+  const l1 = 16 + (h % 18);
+  const angle = 120 + (h % 80);
   return `<div class="gen" style="background:
-      radial-gradient(circle at 25% 15%, hsl(${(h + 40) % 360} 85% 60% / .45), transparent 55%),
-      linear-gradient(155deg, hsl(${h} 70% 34%), hsl(${(h + 60) % 360} 70% 16%) 62%, #0a0914)">
+      radial-gradient(circle at 25% 15%, rgb(255 255 255 / .16), transparent 55%),
+      linear-gradient(${angle}deg, hsl(240 4% ${l1}%), hsl(240 5% 9%) 62%, #050506)">
       <span class="mark" style="background:url(/logo-mark.svg) center/contain no-repeat;aspect-ratio:1"></span>
       <span class="initials">${esc(initials(title))}</span>
     </div>`;
@@ -291,6 +346,12 @@ function canPlay(g: Game): boolean {
   return g.category !== "not_installed" && !!g.executable_path && !g.exe_missing;
 }
 
+/** "42h 15m jouées" — playtime of this game only. */
+function playedLabel(g: Game): string {
+  if (g.category === "launcher") return "Non chronométré";
+  return g.playtime_minutes > 0 ? `${formatPlaytime(g.playtime_minutes)} jouées` : "Jamais lancé";
+}
+
 function cardHtml(g: Game, i: number): string {
   const running = state.running.get(g.id);
   const isOpen = state.open.has(g.id);
@@ -301,8 +362,10 @@ function cardHtml(g: Game, i: number): string {
   if (g.exe_missing) badges.push(`<span class="badge badge-warn" title="${esc(g.executable_path)}">Exe introuvable</span>`);
   const dir = g.install_dir || g.executable_path;
   const sub = running
-    ? `<span class="text-cyan-300">Session <b data-since="${esc(running.started_at)}" class="font-semibold tabular-nums">0:00</b></span>`
-    : `${formatPlaytime(g.playtime_minutes)} · ${formatRelative(g.last_played_at)}`;
+    ? `<span class="playtime">${icon.clock}Session <b data-since="${esc(running.started_at)}" class="tabular-nums">0:00</b></span>`
+    : `<span class="playtime" title="Dernière session : ${esc(formatRelative(g.last_played_at))}">${icon.clock}${playedLabel(g)}</span>`;
+  const avg = g.session_count > 0 ? Math.round(g.playtime_minutes / g.session_count) : 0;
+  const timed = g.category !== "launcher";
 
   return `
   <article class="card ${isOpen ? "open" : ""} ${running ? "is-running" : ""}" data-id="${g.id}"
@@ -326,13 +389,19 @@ function cardHtml(g: Game, i: number): string {
     </div>
     <div class="options"><div>
       <div class="glass rounded-xl px-3 py-1">
-        <div class="opt-row"><span>Temps de jeu</span><span class="text-grad">${formatPlaytime(g.playtime_minutes)}</span></div>
-        <div class="opt-row"><span>Version</span><span>${esc(g.version || "—")}</span></div>
+        ${
+          timed
+            ? `<div class="opt-hero"><p class="text-[11px] font-semibold uppercase tracking-wider text-muted">Temps de jeu sur ce jeu</p><b class="text-grad">${formatPlaytime(g.playtime_minutes)}</b></div>
+        <div class="opt-row"><span>Sessions</span><span>${g.session_count}</span></div>
+        ${avg ? `<div class="opt-row"><span>Moyenne / session</span><span>${formatPlaytime(avg)}</span></div>` : ""}`
+            : ""
+        }
         <div class="opt-row"><span>Dernière session</span><span>${formatRelative(g.last_played_at)}</span></div>
+        <div class="opt-row"><span>Version</span><span>${esc(g.version || "—")}</span></div>
         <div class="opt-row"><span>Catégorie</span><span>${CATEGORY_LABEL[g.category]}</span></div>
       </div>
       <div class="mt-2 grid grid-cols-[1fr_auto_auto] gap-1.5">
-        <button class="btn btn-ghost btn-sm" data-action="open-folder" ${dir ? "" : "disabled"} title="${esc(dir)}">${icon.folder}Ouvrir l'emplacement</button>
+        <button class="btn btn-ghost btn-sm min-w-0 !px-2" data-action="open-folder" ${dir ? "" : "disabled"} title="Ouvrir l'emplacement : ${esc(dir)}">${icon.folder}<span class="truncate">Emplacement</span></button>
         <button class="btn btn-ghost btn-sm !px-2.5" data-action="edit" title="Modifier">${icon.edit}</button>
         <button class="btn btn-danger btn-sm !px-2.5" data-action="delete" title="Supprimer">${icon.trash}</button>
       </div>
@@ -348,16 +417,21 @@ function renderGrid(): void {
     const emptyLib = state.games.length === 0;
     grid.innerHTML = `
       <div class="empty glass col-span-full flex flex-col items-center rounded-3xl px-8 py-16 text-center">
-        <div class="grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-cyan-400/20 to-violet-500/30 text-violet-200 [&_.icon]:h-8 [&_.icon]:w-8">${icon.gamepad}</div>
+        <div class="icon-tile h-16 w-16 [&_.icon]:h-8 [&_.icon]:w-8">${icon.gamepad}</div>
         <h3 class="mt-5 font-display text-xl font-bold">${emptyLib ? "Ta bibliothèque est vide" : "Aucun résultat"}</h3>
         <p class="mt-2 max-w-md text-sm text-muted">${
           emptyLib
-            ? "Ajoute un jeu via son .exe — ou glisse-dépose l'exécutable directement dans la fenêtre."
+            ? "Ajoute un jeu via son .exe, glisse-dépose l'exécutable dans la fenêtre, ou laisse REZ launcher trouver tes jeux installés."
             : "Essaie un autre filtre ou une autre recherche."
         }</p>
-        ${emptyLib ? `<button class="btn btn-primary mt-6" data-action="add">${icon.plus}Ajouter mon premier jeu</button>` : ""}
+        ${
+          emptyLib
+            ? `<div class="mt-6 flex gap-2"><button class="btn btn-ghost" data-action="scan">${icon.radar}Trouver mes jeux</button><button class="btn btn-primary" data-action="add">${icon.plus}Ajouter un jeu</button></div>`
+            : ""
+        }
       </div>`;
     grid.querySelector('[data-action="add"]')?.addEventListener("click", () => openGameForm());
+    grid.querySelector('[data-action="scan"]')?.addEventListener("click", () => void scanNow());
     return;
   }
   grid.innerHTML = list.map(cardHtml).join("");
@@ -377,10 +451,9 @@ function renderHero(): void {
   }
   slot.classList.add("mt-7");
   const src = coverSrc(g.cover_image_url);
-  const h = hueFrom(g.title);
   const bg = src
     ? `background-image:url('${esc(src)}')`
-    : `background:linear-gradient(120deg, hsl(${h} 80% 45%), hsl(${(h + 70) % 360} 80% 35%))`;
+    : `background:linear-gradient(120deg, #3f3f46, #18181b 60%, #09090b)`;
   const running = state.running.get(g.id);
   slot.innerHTML = `
     <div class="hero glass" data-id="${g.id}">
@@ -388,10 +461,10 @@ function renderHero(): void {
       <div class="hero-content flex items-center gap-7 p-7">
         <div class="cover hidden w-[118px] shrink-0 sm:block" data-action="play">${coverHtml(g)}</div>
         <div class="min-w-0 flex-1">
-          <p class="text-[11px] font-bold uppercase tracking-[0.25em] text-cyan-300/90">${running ? "En cours" : "Reprendre"}</p>
+          <p class="kicker">${running ? "En cours" : "Reprendre"}</p>
           <h2 class="mt-2 truncate font-display text-[30px] font-bold tracking-tight">${esc(g.title)}</h2>
           <div class="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted">
-            <span class="flex items-center gap-1.5">${icon.clock}<b class="text-white/90">${formatPlaytime(g.playtime_minutes)}</b> au total</span>
+            <span class="flex items-center gap-1.5">${icon.clock}<b class="text-white/90">${formatPlaytime(g.playtime_minutes)}</b> jouées sur ce jeu</span>
             <span>Dernière session : <b class="text-white/90">${formatRelative(g.last_played_at)}</b></span>
             ${g.version ? `<span>Version <b class="text-white/90">${esc(g.version)}</b></span>` : ""}
           </div>
@@ -400,7 +473,7 @@ function renderHero(): void {
           <button class="btn btn-ghost" data-action="open-folder">${icon.folder}Emplacement</button>
           ${
             running
-              ? `<span class="btn btn-ghost !border-cyan-400/40 text-cyan-200 tabular-nums">${icon.clock}<b data-since="${esc(running.started_at)}">0:00</b></span>`
+              ? `<span class="btn btn-ghost !border-white/30 tabular-nums">${icon.clock}<b data-since="${esc(running.started_at)}">0:00</b></span>`
               : `<button class="btn btn-primary !h-11 !px-6 text-[15px]" data-action="play"><span class="[&_svg]:h-4 [&_svg]:w-4">${icon.play}</span>Jouer</button>`
           }
         </div>
@@ -443,7 +516,7 @@ async function onGridClick(e: Event): Promise<void> {
     case "delete": {
       const ok = await confirmModal(
         "Supprimer ce jeu ?",
-        `<b class="text-white">${esc(game.title)}</b> sera retiré de GameREZ avec son historique de sessions (${formatPlaytime(
+        `<b class="text-white">${esc(game.title)}</b> sera retiré de REZ launcher avec son historique de sessions (${formatPlaytime(
           game.playtime_minutes,
         )}). <br/>Les fichiers du jeu sur ton disque ne sont <b class="text-white">pas</b> touchés.`,
         "Supprimer",
@@ -473,7 +546,7 @@ async function launch(game: Game): Promise<void> {
       toast(`${game.title} ouvert`, "Les launchers ne sont pas chronométrés.");
     } else {
       onStarted(rg);
-      toast(`C'est parti : ${game.title}`, "Le chrono tourne. Bon jeu !");
+      toast(`C'est parti : ${game.title}`, "Le chrono de ce jeu tourne. Bon jeu !");
     }
   } catch (err) {
     errorToast(err, "Lancement impossible");
@@ -491,6 +564,7 @@ function onStarted(rg: RunningGame): void {
 
 /* Subtle 3D tilt + light sheen following the cursor. */
 function onTilt(e: MouseEvent): void {
+  if (!state.settings.tilt) return;
   const cover = (e.target as HTMLElement).closest<HTMLElement>(".cover");
   const card = cover?.closest<HTMLElement>(".card");
   if (!cover || !card) return;
@@ -616,7 +690,7 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
       m.close();
       renderSidebar();
       if (state.view === "library") updateLibrary(true);
-      else renderLaunchers();
+      else if (state.view === "launchers") renderLaunchers();
       toast(game ? "Jeu mis à jour" : "Jeu ajouté", saved.title);
     } catch (err) {
       errorToast(err, "Enregistrement impossible");
@@ -633,15 +707,6 @@ function coverPreview(title: string, url: string): string {
 }
 
 /* ============================== Launchers ============================== */
-
-const LAUNCHER_STYLE: Record<string, string> = {
-  steam: "linear-gradient(135deg,#1b2838,#2a475e 60%,#66c0f4)",
-  epic: "linear-gradient(135deg,#202020,#3a3a3a 60%,#9a9a9a)",
-  battlenet: "linear-gradient(135deg,#0b3d91,#148eff)",
-  ubisoft: "linear-gradient(135deg,#1d1aa8,#0070ff 55%,#a855f7)",
-  gog: "linear-gradient(135deg,#4b1659,#86328a)",
-  ea: "linear-gradient(135deg,#7a1020,#ff4747)",
-};
 
 function pickDefaultDrive(drives: DriveInfo[]): string | null {
   const fixed = drives.filter((d) => !d.removable && /^[A-Z]:\\?$/i.test(d.mount));
@@ -676,7 +741,6 @@ function renderLaunchers(): void {
     return;
   }
   const drive = state.drive ?? "D:\\";
-  const driveLabel = drive.replace(/\\$/, "");
   const driveOptions = state.drives
     .map(
       (d) =>
@@ -691,41 +755,18 @@ function renderLaunchers(): void {
     <div class="mx-auto max-w-[1300px] px-10 pb-16 pt-8">
       <header class="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 class="font-display text-[34px] font-bold tracking-tight">Launchers <span class="text-grad">& PC propre</span></h1>
-          <p class="mt-1 text-sm text-muted">Installe tes launchers au bon endroit, une bonne fois pour toutes. ${detected}/${state.launchers.length} détectés.</p>
+          <h1 class="font-display text-[34px] font-bold tracking-tight">Launchers</h1>
+          <p class="mt-1 text-sm text-muted">${detected}/${state.launchers.length} détectés. Chaque launcher a son guide pas-à-pas pour l'installer au bon endroit.</p>
         </div>
         <div class="flex items-center gap-2.5">
-          <label class="flex items-center gap-2 text-sm text-muted">${icon.drive}
-            <select id="drive" class="field !w-auto pr-8" title="Disque de jeux">${driveOptions || `<option>${esc(driveLabel)}</option>`}</select>
+          <label class="flex items-center gap-2 text-sm text-muted" title="Disque utilisé par les guides">${icon.drive}
+            <select id="drive" class="field !w-auto pr-8">${driveOptions || `<option>${esc(drive)}</option>`}</select>
           </label>
           <button class="btn btn-ghost" id="rescan">${icon.refresh}Relancer la détection</button>
         </div>
       </header>
 
-      <section class="mt-7 grid gap-4 lg:grid-cols-[1.1fr_1fr]">
-        <div class="glass rounded-2xl p-5">
-          <p class="label">Structure recommandée</p>
-          <div class="tree mt-2">${structureTree(driveLabel)}</div>
-        </div>
-        <div class="glass rounded-2xl p-5">
-          <p class="label">Les règles d'or</p>
-          <ul class="mt-3 space-y-3 text-sm">
-            ${[
-              ["Un seul dossier racine", `Tous tes jeux dans <code>${esc(driveLabel)}\\Jeux</code>, rien dans <code>Program Files</code>.`],
-              ["Un sous-dossier par launcher", "Plus de doublons, plus de jeux perdus, désinstallation propre."],
-              ["Sites officiels uniquement", "Les boutons « Télécharger » ouvrent la page officielle de l'éditeur."],
-              ["Un disque dédié si possible", "Garde ton disque système (C:) léger et rapide."],
-            ]
-              .map(
-                ([t, b]) =>
-                  `<li class="flex gap-3"><span class="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-violet-500/20 text-violet-200 [&_.icon]:h-3 [&_.icon]:w-3">${icon.check}</span><span><b class="text-white/90">${t}.</b> <span class="text-muted">${b}</span></span></li>`,
-              )
-              .join("")}
-          </ul>
-        </div>
-      </section>
-
-      <section class="mt-6 grid items-start gap-4 xl:grid-cols-2">
+      <section class="mt-7 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         ${state.launchers.map((l, i) => launcherCard(l, i, drive)).join("")}
       </section>
     </div>`;
@@ -739,34 +780,22 @@ function renderLaunchers(): void {
   view.querySelectorAll<HTMLElement>(".launcher-card").forEach((card) => card.addEventListener("click", onLauncherClick));
 }
 
-function structureTree(drive: string): string {
-  const ls = state.launchers ?? [];
-  const lines = ls.map((l, i) => {
-    const last = i === ls.length - 1;
-    const sub = l.id === "steam" ? "steamapps\\common\\…" : "Games\\…";
-    return `${last ? "└─" : "├─"} <b>${esc(l.recommended_folder)}\\</b>  <em>${esc(l.name)} + ${sub}</em>`;
-  });
-  return `<b>${esc(drive)}\\</b>\n└─ <b>Jeux\\</b>\n${lines.map((l) => "   " + l).join("\n")}`;
-}
-
 function launcherCard(l: LauncherInfo, i: number, drive: string): string {
-  const open = state.guideOpen === l.id;
   const steps = guideFor(l.id, l.name, l.recommended_folder, drive);
-  const done = new Set(state.guideDone[l.id] ?? []);
-  const pct = Math.round((done.size / steps.length) * 100);
+  const done = (state.guideDone[l.id] ?? []).filter((x) => x < steps.length).length;
+  const pct = Math.round((done / steps.length) * 100);
   const added = inLibrary(l);
-  const initialsTxt = l.name.replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase();
 
   return `
-  <article class="launcher-card glass p-5" data-launcher="${esc(l.id)}" style="--i:${i}">
+  <article class="launcher-card glass flex flex-col p-5" data-launcher="${esc(l.id)}" style="--i:${i}">
     <div class="flex items-start gap-4">
-      <div class="launcher-logo shrink-0" style="background:${LAUNCHER_STYLE[l.id] ?? "var(--grad)"}">${esc(initialsTxt)}</div>
+      <div class="launcher-logo shrink-0">${launcherLogo(l.id)}</div>
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-2">
           <h3 class="font-display text-lg font-bold">${esc(l.name)}</h3>
           ${
             l.detected_exe
-              ? `<span class="badge !border-emerald-400/40 !text-emerald-300">${icon.check.replace('class="icon"', 'class="h-3 w-3"')}Détecté</span>`
+              ? `<span class="badge badge-ok">${icon.check.replace('class="icon"', 'class="h-3 w-3"')}Détecté</span>`
               : `<span class="badge">Non détecté</span>`
           }
         </div>
@@ -775,7 +804,15 @@ function launcherCard(l: LauncherInfo, i: number, drive: string): string {
         }</p>
       </div>
     </div>
-    <div class="mt-4 flex flex-wrap gap-2">
+    <button class="mt-5 flex w-full items-center gap-3 rounded-xl border border-white/5 bg-black/20 px-3.5 py-3 text-left transition hover:border-white/20 hover:bg-white/[0.04]" data-act="guide">
+      <span class="text-muted">${icon.book}</span>
+      <span class="min-w-0 flex-1">
+        <span class="block text-sm font-semibold">Guide d'installation</span>
+        <span class="mt-1.5 flex items-center gap-2"><span class="progress flex-1"><i style="width:${pct}%"></i></span><span class="text-[11px] text-muted tabular-nums">${done}/${steps.length}</span></span>
+      </span>
+      <span class="text-muted">${icon.arrowRight}</span>
+    </button>
+    <div class="mt-3 flex flex-wrap gap-2">
       <button class="btn btn-ghost btn-sm" data-act="download">${icon.download}Télécharger</button>
       ${
         l.detected_exe
@@ -784,49 +821,13 @@ function launcherCard(l: LauncherInfo, i: number, drive: string): string {
             : `<button class="btn btn-ghost btn-sm" data-act="add">${icon.plus}Ajouter à la bibliothèque</button>`
           : ""
       }
-      <button class="btn btn-sm ${open ? "btn-primary" : "btn-ghost"} ml-auto" data-act="guide" aria-expanded="${open}">${icon.book}Guide de rangement<span class="ml-1 text-[11px] opacity-70">${pct}%</span></button>
     </div>
-    ${
-      open
-        ? `<div class="mt-5 rounded-xl border border-white/5 bg-black/20 p-4">
-        <div class="flex items-center gap-3"><div class="progress flex-1"><i style="width:${pct}%"></i></div><span class="text-xs text-muted">${done.size}/${steps.length}</span></div>
-        <ol class="steps mt-2">
-          ${steps
-            .map((s, idx) => {
-              const isDone = done.has(idx);
-              let action = "";
-              if (s.action?.kind === "create_folder")
-                action = `<button class="btn btn-ghost btn-sm" data-act="mkdir" data-path="${esc(s.action.path)}" title="Créer ${esc(s.action.path)}">${icon.folderPlus}Créer</button>`;
-              else if (s.action?.kind === "download")
-                action = `<button class="btn btn-ghost btn-sm" data-act="download">${icon.external}Site officiel</button>`;
-              else if (s.action?.kind === "rescan")
-                action = `<button class="btn btn-ghost btn-sm" data-act="rescan">${icon.refresh}Détecter</button>`;
-              return `<li class="step ${isDone ? "done" : ""}">
-                <button class="step-check" data-act="check" data-step="${idx}" aria-pressed="${isDone}" title="Marquer comme fait">${isDone ? icon.check.replace('class="icon"', 'class="h-4 w-4"') : idx + 1}</button>
-                <div class="min-w-0"><p class="step-title text-sm font-semibold">${s.title}</p><p class="mt-1 text-[13px] leading-relaxed text-muted">${s.body}</p></div>
-                <div>${action}</div>
-              </li>`;
-            })
-            .join("")}
-        </ol>
-      </div>`
-        : ""
-    }
   </article>`;
 }
 
 async function rescan(): Promise<void> {
   state.launchers = null;
   renderLaunchers();
-}
-
-function markStep(id: string, idx: number, value?: boolean): void {
-  const set = new Set(state.guideDone[id] ?? []);
-  const on = value ?? !set.has(idx);
-  if (on) set.add(idx);
-  else set.delete(idx);
-  state.guideDone[id] = [...set].sort((a, b) => a - b);
-  persist();
 }
 
 async function onLauncherClick(e: Event): Promise<void> {
@@ -836,19 +837,28 @@ async function onLauncherClick(e: Event): Promise<void> {
   const id = card.dataset.launcher!;
   const l = state.launchers?.find((x) => x.id === id);
   if (!l) return;
-  const steps = guideFor(l.id, l.name, l.recommended_folder, state.drive ?? "D:\\");
 
   switch (btn.dataset.act) {
+    case "guide":
+      openGuide(l, {
+        drive: state.drive ?? "D:\\",
+        done: state.guideDone[id] ?? [],
+        onProgress: (done) => {
+          state.guideDone[id] = done;
+          persist();
+          if (state.view === "launchers") refreshLaunchersInPlace();
+        },
+        onRescan: () => void rescan(),
+      });
+      return;
     case "download":
       try {
         await api.openLauncherDownload(id);
-        const dl = steps.findIndex((s) => s.action?.kind === "download");
-        if (state.guideOpen === id && dl >= 0) markStep(id, dl, true);
         toast(`Page officielle de ${l.name} ouverte`, "Dans ton navigateur par défaut.");
       } catch (err) {
         errorToast(err);
       }
-      break;
+      return;
     case "add":
       try {
         const g = await api.addGame({
@@ -861,36 +871,51 @@ async function onLauncherClick(e: Event): Promise<void> {
         });
         state.games.push(g);
         renderSidebar();
+        refreshLaunchersInPlace();
         toast(`${l.name} ajouté`, "Retrouve-le dans le filtre « Launchers ».");
       } catch (err) {
         errorToast(err);
       }
-      break;
-    case "guide":
-      state.guideOpen = state.guideOpen === id ? null : id;
-      break;
-    case "check":
-      markStep(id, Number(btn.dataset.step));
-      break;
-    case "mkdir":
-      try {
-        const p = await api.createFolder(btn.dataset.path!);
-        const idx = steps.findIndex((s) => s.action?.kind === "create_folder" && s.action.path === btn.dataset.path);
-        if (idx >= 0) markStep(id, idx, true);
-        toast("Dossier prêt", p);
-      } catch (err) {
-        errorToast(err, "Création impossible");
-      }
-      break;
-    case "rescan":
-      return rescan();
+      return;
   }
-  if (state.view === "launchers") {
-    const scroll = $("#view")!.scrollTop;
-    renderLaunchers();
-    $("#view")!.scrollTop = scroll;
-    // Keep entry animations from replaying on in-place updates.
-    document.querySelectorAll<HTMLElement>(".launcher-card").forEach((c) => (c.style.animation = "none"));
+}
+
+function refreshLaunchersInPlace(): void {
+  const scroll = $("#view")!.scrollTop;
+  renderLaunchers();
+  $("#view")!.scrollTop = scroll;
+  // Keep entry animations from replaying on in-place updates.
+  document.querySelectorAll<HTMLElement>(".launcher-card").forEach((c) => (c.style.animation = "none"));
+}
+
+/* ============================== Settings view ============================== */
+
+function renderSettingsView(): void {
+  renderSettings($("#view")!, {
+    get: () => state.settings,
+    save: saveSettings,
+    scanNow,
+    afterCacheClear: persist,
+  });
+}
+
+/* ============================== Detection ============================== */
+
+const detectionCtx = {
+  onAdded: (games: Game[]) => {
+    state.games = [...state.games, ...games];
+    renderSidebar();
+    if (state.view === "library") updateLibrary(true);
+  },
+};
+
+async function scanNow(): Promise<void> {
+  try {
+    const found: Detected[] = await api.scanGamesNow();
+    if (found.length === 0) toast("Aucun nouveau jeu trouvé", "Tous tes jeux installés sont déjà dans ta bibliothèque.");
+    else showDetections(found, detectionCtx);
+  } catch (err) {
+    errorToast(err, "Analyse impossible");
   }
 }
 
@@ -916,7 +941,7 @@ async function setupDragDrop(): Promise<void> {
       if (!overlay) {
         overlay = document.createElement("div");
         overlay.className = "drop-overlay";
-        overlay.innerHTML = `<div class="text-center"><div class="mx-auto grid h-16 w-16 place-items-center rounded-2xl bg-violet-500/20 text-violet-200 [&_.icon]:h-8 [&_.icon]:w-8">${icon.download}</div><p class="mt-4 font-display text-xl font-bold">Dépose ton .exe ici</p><p class="mt-1 text-sm text-muted">GameREZ lira son nom et sa version.</p></div>`;
+        overlay.innerHTML = `<div class="text-center"><div class="icon-tile mx-auto h-16 w-16 [&_.icon]:h-8 [&_.icon]:w-8">${icon.download}</div><p class="mt-4 font-display text-xl font-bold">Dépose ton .exe ici</p><p class="mt-1 text-sm text-muted">REZ launcher lira son nom et sa version.</p></div>`;
         document.body.appendChild(overlay);
       }
     } else if (p.type === "leave") {
@@ -941,6 +966,12 @@ async function boot(): Promise<void> {
     installMock(m.mockApi, m.mockEvents);
   }
 
+  try {
+    state.settings = await api.getSettings();
+  } catch {
+    /* defaults */
+  }
+  applyVisualPrefs(state.settings);
   renderShell();
 
   // Broken cover URL -> generated cover.
@@ -976,17 +1007,34 @@ async function boot(): Promise<void> {
     updateLibrary(true);
     toast(
       `Session terminée · ${game.title}`,
-      `+${formatSession(session_seconds)} — total ${formatPlaytime(game.playtime_minutes)}`,
+      `+${formatSession(session_seconds)} — ${formatPlaytime(game.playtime_minutes)} jouées sur ce jeu`,
       "info",
       7000,
     );
   });
+  await events.onGamesDetected(() => {
+    void api.pendingDetections().then((l) => showDetections(l, detectionCtx), () => {});
+  });
   void setupDragDrop();
 
+  onUpdateStatus((s) => {
+    state.updateAvailable = s.kind === "available";
+    renderSidebar();
+  });
+
   setInterval(tickTimers, 1000);
-  state.view = "library";
+  state.view = state.settings.start_view;
   renderSidebar();
-  renderLibrary();
+  renderView();
+
+  // Games detected while the app was closed / before the UI was ready.
+  try {
+    const pending = await api.pendingDetections();
+    if (pending.length) showDetections(pending, detectionCtx);
+  } catch {
+    /* ignore */
+  }
+  if (state.settings.check_updates_on_start) setTimeout(() => void checkForUpdates(true), 2500);
 }
 
 void boot();
