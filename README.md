@@ -49,7 +49,20 @@ Supprimer un jeu de GameREZ retire uniquement sa fiche : les fichiers sur le dis
 
 ## Installation
 
-Télécharge l'installateur (`.exe` NSIS ou `.msi`) depuis la page **Releases** du dépôt.
+1. Va sur la page [**Releases**](https://github.com/reztsk/GameREZ/releases/latest).
+2. Télécharge **`GameREZ_x.y.z_x64-setup.exe`** et lance-le.
+   - Installation pour ton compte uniquement (pas de droits admin) dans `%LOCALAPPDATA%\GameREZ`.
+   - Raccourci **bureau** + menu Démarrer avec l'icône GameREZ.
+   - Désinstallation propre depuis *Paramètres › Applications*.
+3. Pas envie d'installer ? Prends **`GameREZ_x.y.z_x64_portable.exe`** et lance-le directement.
+
+> L'exe n'est pas signé : si Windows SmartScreen bloque, clique sur *Informations complémentaires* › *Exécuter quand même*.
+
+### Publier une nouvelle version
+
+1. Monte la version dans `src-tauri/tauri.conf.json` (et `package.json`, `Cargo.toml`).
+2. `git tag v0.2.0 && git push origin v0.2.0`
+3. Le workflow **Release** compile GameREZ sous Windows et publie la release avec l'installateur et l'exe portable.
 
 ## Développement
 
@@ -58,7 +71,7 @@ Prérequis : [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) stable
 ```bash
 npm install
 npm run tauri dev      # app en mode développement
-npm run tauri build    # installateurs dans src-tauri/target/release/bundle/
+npm run tauri build    # installateur dans src-tauri/target/release/bundle/nsis/
 npm test               # tests frontend (node:test)
 npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détection…)
 ```
@@ -70,7 +83,7 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 ```
 ├─ assets/                 Logo (SVG sources + PNG haute résolution)
 ├─ public/                 Logo servi à l'UI
-├─ scripts/render-logo.mjs Génère les PNG depuis les SVG (npm run logo)
+├─ scripts/render-logo.mjs Source du logo : génère SVG, PNG et image de l'installateur (npm run logo)
 ├─ src/                    Frontend TypeScript + Tailwind
 │  ├─ main.ts              Vues Bibliothèque / Launchers, formulaire, événements
 │  ├─ api.ts               Bridge typé vers les commandes Tauri

@@ -78,7 +78,7 @@ function renderShell(): void {
   app.innerHTML = `
     <aside class="sidebar flex h-full flex-col px-[14px] py-6">
       <div class="flex items-center gap-3 px-2">
-        <img src="/logo-mark.svg" alt="" class="h-10 w-10 drop-shadow-[0_0_14px_rgba(139,92,246,0.6)]" />
+        <img src="/logo-mark.svg" alt="" class="h-10 w-10 drop-shadow-[0_0_12px_rgba(255,255,255,0.25)]" />
         <div class="leading-none">
           <div class="font-display text-[22px] font-black tracking-[0.12em]">GAME<span class="text-grad">REZ</span></div>
           <div class="mt-1 text-[10px] font-semibold uppercase tracking-[0.28em] text-muted">Launcher</div>

@@ -3,6 +3,7 @@
   "productName": "GameREZ",
   "version": "0.1.0",
   "identifier": "io.github.gamerez",
+  "mainBinaryName": "GameREZ",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -27,13 +28,17 @@
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/covers/**"]
+        "scope": [
+          "$APPDATA/covers/**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis"
+    ],
     "publisher": "GameREZ contributors",
     "category": "Game",
     "shortDescription": "Open-source game launcher & playtime tracker",
@@ -45,6 +50,24 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "homepage": "https://github.com/reztsk/GameREZ",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "sidebarImage": "installer/sidebar.bmp",
+        "languages": [
+          "French",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "compression": "lzma"
+      }
+    }
   }
 }
