@@ -15,6 +15,10 @@
 - **Temps de jeu par jeu** : un watcher Rust suit le processus du jeu et enregistre chaque session (en secondes) dans une base SQLite locale. Chaque jaquette affiche son propre compteur (« 42h 15m jouées »).
 - **Nouveaux jeux détectés tout seuls** : installe un jeu, REZ launcher te propose de l'ajouter.
 - **Mises à jour automatiques** : une pop-up te propose la nouvelle version, un clic pour l'installer.
+- **Boîtes 3D et carrousel 3D** : chaque jeu a sa boîte (jaquette, tranche en relief, dos avec description) ; parcours ta bibliothèque en carrousel 3D.
+- **Lancement immersif** : la boîte s'ouvre, une barre de chargement suit le démarrage, puis REZ launcher se réduit dès que la fenêtre du jeu apparaît et revient quand tu quittes le jeu.
+- **Jaquettes sur mesure** : importe une image, déplace-la, zoome, centre. Les jeux Steam reçoivent leur jaquette officielle automatiquement.
+- **Thèmes & effet verre** : 6 duos de couleurs (Acier, Cyber cyan, Néon, Carbone, Ambre, Glacier) et un effet verre givré façon Apple.
 - **Assistant « PC propre »** : un guide pas-à-pas en carrousel par launcher pour ranger tes disques (`D:\Jeux\BattleNet`, `D:\Jeux\Steam`…).
 - **Léger** : pas d'Electron. Binaire natif de quelques Mo.
 
@@ -27,6 +31,7 @@ REZ launcher est **strictement** un lanceur de raccourcis et un chronomètre :
 | Lancer l'exécutable via l'API de l'OS (`std::process::Command` / ShellExecute) | Injecter du code ou lire/écrire la mémoire d'un jeu |
 | Lire la liste des processus (comme le Gestionnaire des tâches) | Écrire, modifier, déplacer ou supprimer un fichier de jeu, de dossier d'installation ou de launcher |
 | Lire le nom et la version d'un `.exe` (comme Explorer › Propriétés) | Contourner un DRM ou un anti-cheat |
+| Lire la liste des fenêtres ouvertes (comme Alt+Tab) pour savoir quand le jeu s'affiche | Ouvrir un handle sur le processus d'un jeu |
 | Lire (sans les modifier) les manifestes d'installation Steam / Epic / GOG | Lancer un jeu par un autre moyen qu'un raccourci |
 
 Supprimer un jeu de REZ launcher retire uniquement sa fiche : les fichiers sur le disque ne sont pas touchés.
@@ -38,7 +43,9 @@ Supprimer un jeu de REZ launcher retire uniquement sa fiche : les fichiers sur l
 - **Import** d'un jeu via son `.exe` (sélecteur natif ou **glisser-déposer**) : titre et version lus automatiquement.
 - **Détection des nouveaux jeux** (voir plus bas) avec pop-up « Veux-tu l'ajouter à la bibliothèque REZ launcher ? ».
 - **Launchers** : détection de Steam, Epic Games, Battle.net, Ubisoft Connect, GOG Galaxy, EA app, avec leurs logos ; bouton **Télécharger** (site officiel uniquement, URLs en liste blanche côté Rust) ; **guide interactif en carrousel** propre à chaque launcher.
-- **Paramètres** : taille des jaquettes, animations, effet 3D, fond animé ; vérification des mises à jour ; dossiers de recherche des jeux ; lancement avec Windows ; onglet d'ouverture ; vidage du cache.
+- **Affichage** au choix (*Paramètres*) : **Grille**, **Boîte 3D** (clic sur un jeu = sa boîte 3D interactive) ou **Carrousel 3D**.
+- **Éditeur de jaquette** : image locale ou URL, glisser pour déplacer, molette/curseur pour zoomer, centrer, réinitialiser ; aperçu en 3D en direct. Seul le cadrage est enregistré : l'image d'origine reste intacte.
+- **Paramètres** : thème, mode d'affichage, effet verre, taille des jaquettes, animations, effet 3D, fond animé ; animation de lancement, réduction pendant le jeu, réaffichage à la fermeture ; mises à jour ; dossiers de recherche ; lancement avec Windows ; onglet d'ouverture ; vidage du cache.
 
 ### Comment le temps de jeu est mesuré
 
@@ -46,7 +53,8 @@ Supprimer un jeu de REZ launcher retire uniquement sa fiche : les fichiers sur l
 2. Une tâche `tokio` surveille le PID toutes les 2 s.
 3. Beaucoup de jeux passent par un *bootstrapper* qui se ferme tout de suite : REZ launcher continue alors de suivre tout processus dont l'exécutable est **dans le dossier d'installation du jeu** (les dossiers génériques comme `steamapps\common` ou `D:\Jeux` sont exclus pour ne pas compter un autre jeu).
 4. Toutes les 15 s, la session est sauvegardée (*heartbeat*) : en cas de crash du PC, le temps joué jusque-là est conservé.
-5. À la fermeture : durée exacte enregistrée, temps du jeu recalculé depuis la somme de **ses** sessions, événement `game-stopped` émis vers l'UI.
+5. Dès qu'une fenêtre visible du jeu apparaît (liste des fenêtres en lecture seule, comme Alt+Tab ; 25 s max), l'événement `game-ready` termine l'animation de lancement et REZ launcher se réduit.
+6. À la fermeture : durée exacte enregistrée, temps du jeu recalculé depuis la somme de **ses** sessions, événement `game-stopped` émis vers l'UI, et REZ launcher revient au premier plan.
 
 > Les **launchers** (Steam, Epic…) restent dans la barre des tâches en permanence : ils sont lancés mais pas chronométrés.
 
@@ -98,7 +106,7 @@ npm test               # tests frontend (node:test)
 npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détection…)
 ```
 
-`npm run dev` seul ouvre l'interface dans un navigateur avec des **données de démo** (backend simulé). Ajoute `?detect=3` ou `?update=1` à l'URL pour voir les pop-ups de détection et de mise à jour.
+`npm run dev` seul ouvre l'interface dans un navigateur avec des **données de démo** (backend simulé). Ajoute `?detect=3` ou `?update=1` à l'URL pour voir les pop-ups de détection et de mise à jour, `?mode=carousel` ou `?mode=box3d` pour les vues 3D, `?theme=cyan` pour un thème.
 
 ## Architecture
 
@@ -111,6 +119,12 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 ├─ src/                     Frontend TypeScript + Tailwind
 │  ├─ main.ts               Vues Bibliothèque / Launchers, formulaire, événements
 │  ├─ settings-view.ts      Onglet Paramètres
+│  ├─ box3d.ts              Boîte de jeu 3D (face, tranche, dos) + visionneuse
+│  ├─ carousel.ts           Mode « Carrousel 3D »
+│  ├─ cover-editor.ts       Éditeur de jaquette (import, déplacer, zoomer, centrer)
+│  ├─ launch-overlay.ts     Animation de lancement
+│  ├─ covers.ts / fx-math.ts  Rendu des jaquettes, maths des vues 3D
+│  ├─ themes.ts / fx.css    Thèmes, effet verre, styles 3D
 │  ├─ guide-modal.ts        Guides en carrousel par launcher
 │  ├─ detection.ts          Pop-up « nouveau jeu détecté »
 │  ├─ updates.ts            Vérification + installation des mises à jour
@@ -136,6 +150,7 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 | Commande | Rôle |
 | --- | --- |
 | `list_games`, `add_game`, `update_game`, `delete_game` | CRUD bibliothèque |
+| `fill_missing_covers` | Jaquettes officielles Steam pour les jeux qui n'en ont pas |
 | `launch_game(id)` | Lance le jeu et démarre son chrono |
 | `running_games` | Sessions en cours |
 | `open_folder(path)` | Ouvre l'explorateur Windows sur le dossier |
@@ -148,13 +163,13 @@ npm run test:rust      # tests Rust (DB, watcher avec vrais processus, détectio
 | `check_update`, `install_update` | Mise à jour automatique |
 | `clear_cache`, `open_data_dir`, `open_repo` | Données |
 
-Événements : `game-started`, `game-stopped` (`{ game, session_seconds }`), `games-detected`, `update-progress`.
+Événements : `game-started`, `game-ready` (`{ game_id, window }`), `game-stopped` (`{ game, session_seconds }`), `games-detected`, `update-progress`.
 
 ### Données
 
 Base SQLite dans `%APPDATA%\io.github.rezlauncher\rez-launcher.sqlite3` :
 
-- `games` : `id, title, executable_path, install_dir, cover_image_url, version, playtime_minutes, category ('installed' | 'not_installed' | 'launcher'), added_at, last_played_at`
+- `games` : `id, title, executable_path, install_dir, cover_image_url, version, playtime_minutes, category ('installed' | 'not_installed' | 'launcher'), added_at, last_played_at, description, cover_zoom, cover_x, cover_y`
 - `sessions` : `id, game_id, started_at, ended_at, duration_seconds, active`
 - `settings` : préférences (JSON)
 - `detections` : jeux repérés sur le disque et réponse de l'utilisateur (`pending`, `seen`, `ignored`, `added`)

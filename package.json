@@ -1,7 +1,7 @@
 {
   "name": "rez-launcher",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "REZ launcher — open-source, ultra-light desktop game launcher & playtime tracker (Tauri v2).",
   "license": "MIT",

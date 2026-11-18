@@ -9,6 +9,11 @@
 //! exits right away and starts the real game, so when the child is gone we
 //! also look for any running process whose executable lives inside the game's
 //! install directory (read-only process list via `sysinfo`).
+//!
+//! Window behaviour: until the game shows its first window (read-only list of
+//! desktop windows, like Alt+Tab: no process handle is opened) the UI plays the
+//! launch animation; then REZ launcher minimizes itself, and comes back when
+//! the game closes.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -18,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::{Category, Database, Game};
 use crate::error::{AppError, AppResult};
@@ -32,6 +37,8 @@ pub struct Timing {
     pub startup_grace: Duration,
     /// Consecutive "nothing alive" polls before we close the session.
     pub misses_to_stop: u32,
+    /// Give up waiting for a game window after this long ("ready" anyway).
+    pub ready_timeout: Duration,
 }
 
 pub const DEFAULT_TIMING: Timing = Timing {
@@ -39,7 +46,12 @@ pub const DEFAULT_TIMING: Timing = Timing {
     heartbeat_every: Duration::from_secs(15),
     startup_grace: Duration::from_secs(30),
     misses_to_stop: 2,
+    ready_timeout: Duration::from_secs(25),
 };
+
+/// Delay between "game window is up" and minimizing, so the end of the
+/// launch animation is visible.
+const MINIMIZE_DELAY: Duration = Duration::from_millis(900);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunningGame {
@@ -51,6 +63,14 @@ pub struct RunningGame {
 pub struct GameStoppedPayload {
     pub game: Game,
     pub session_seconds: i64,
+}
+
+/// Emitted once the game shows a window (or after `ready_timeout`).
+#[derive(Debug, Clone, Serialize)]
+pub struct GameReadyPayload {
+    pub game_id: i64,
+    /// false when we stopped waiting without seeing a window.
+    pub window: bool,
 }
 
 #[derive(Default)]
@@ -175,18 +195,94 @@ fn is_ignored_helper(exe: &Path) -> bool {
     name.contains("crash") || name.contains("unins") || name.contains("reporter")
 }
 
-fn any_process_inside(sys: &mut System, dir: &Path) -> bool {
+/// PIDs of the processes running from `dir` (read-only process list).
+fn pids_inside(sys: &mut System, dir: &Path) -> Vec<u32> {
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
     );
     let own_pid = std::process::id();
-    sys.processes().values().any(|p| {
-        p.pid().as_u32() != own_pid
-            && p.exe()
-                .is_some_and(|exe| path_is_inside(exe, dir) && !is_ignored_helper(exe))
-    })
+    sys.processes()
+        .values()
+        .filter(|p| {
+            p.pid().as_u32() != own_pid
+                && p.exe()
+                    .is_some_and(|exe| path_is_inside(exe, dir) && !is_ignored_helper(exe))
+        })
+        .map(|p| p.pid().as_u32())
+        .collect()
+}
+
+/// Read-only check of the desktop window list (EnumWindows, like Alt+Tab):
+/// does one of `pids` own a visible, non-tool window of a real size?
+#[cfg(windows)]
+pub fn has_visible_window(pids: &[u32]) -> bool {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+        GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    };
+
+    struct Search<'a> {
+        pids: &'a [u32],
+        found: bool,
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `&mut Search` passed below, alive for the whole call.
+        let search = unsafe { &mut *(lparam as *mut Search) };
+        let mut pid = 0u32;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: plain queries on a window handle given by EnumWindows.
+        let candidate = unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            search.pids.contains(&pid)
+                && IsWindowVisible(hwnd) != 0
+                && (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW) == 0
+                && GetWindowRect(hwnd, &mut rect) != 0
+        };
+        if candidate && rect.right - rect.left >= 64 && rect.bottom - rect.top >= 64 {
+            search.found = true;
+            return 0; // stop enumerating
+        }
+        1
+    }
+
+    if pids.is_empty() {
+        return false;
+    }
+    let mut search = Search { pids, found: false };
+    // SAFETY: the callback only reads window properties; `search` outlives the call.
+    unsafe {
+        EnumWindows(Some(visit), &mut search as *mut Search as LPARAM);
+    }
+    search.found
+}
+
+#[cfg(not(windows))]
+pub fn has_visible_window(_pids: &[u32]) -> bool {
+    false
+}
+
+pub fn minimize_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.minimize();
+    }
+}
+
+pub fn restore_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
 }
 
 /// Start the executable through the OS. Returns the child when we have one.
@@ -260,6 +356,7 @@ pub fn launch(
         });
     }
 
+    let prefs = crate::settings::Settings::load(&db);
     let started_wall = chrono::Utc::now();
     let started_at = started_wall.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let running = RunningGame {
@@ -289,8 +386,23 @@ pub fn launch(
     };
     let _ = app.emit("game-started", &running);
 
-    let watch_dir = watch_dir_for(&game);
     let game_id = game.id;
+    // Without the launch animation there is nothing to wait for: step aside now.
+    if prefs.minimize_on_launch && !prefs.launch_animation {
+        minimize_main(&app);
+    }
+    let ready_app = app.clone();
+    let on_ready: ReadyCallback = Box::new(move |window| {
+        let _ = ready_app.emit("game-ready", GameReadyPayload { game_id, window });
+        if prefs.minimize_on_launch && prefs.launch_animation {
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(MINIMIZE_DELAY).await;
+                minimize_main(&ready_app);
+            });
+        }
+    });
+
+    let watch_dir = watch_dir_for(&game);
     tauri::async_runtime::spawn(async move {
         let session_seconds = watch_session(
             child,
@@ -299,6 +411,7 @@ pub fn launch(
             session_id,
             started_wall,
             DEFAULT_TIMING,
+            Some(on_ready),
         )
         .await;
         let ended = started_wall + chrono::Duration::seconds(session_seconds);
@@ -313,6 +426,10 @@ pub fn launch(
                         session_seconds,
                     },
                 );
+                if crate::settings::Settings::load(&db).restore_on_exit && tracker.list().is_empty()
+                {
+                    restore_main(&app);
+                }
             }
             Err(e) => eprintln!("[rez] finish_session failed: {e}"),
         }
@@ -320,6 +437,9 @@ pub fn launch(
 
     Ok(running)
 }
+
+/// Called once with `true` when a game window shows up, or `false` on timeout.
+pub type ReadyCallback = Box<dyn FnOnce(bool) + Send>;
 
 /// Poll until neither the child nor any process from the install dir is alive.
 /// Returns the session length in seconds (up to the last time it was seen alive).
@@ -330,6 +450,7 @@ async fn watch_session(
     session_id: i64,
     started_wall: chrono::DateTime<chrono::Utc>,
     t: Timing,
+    mut on_ready: Option<ReadyCallback>,
 ) -> i64 {
     let start = Instant::now();
     let mut last_alive = start;
@@ -341,19 +462,35 @@ async fn watch_session(
         tokio::time::sleep(t.poll_every).await;
 
         let mut alive = false;
+        let mut pids = Vec::new();
         if let Some(c) = child.as_mut() {
             match c.try_wait() {
-                Ok(None) => alive = true,
+                Ok(None) => {
+                    alive = true;
+                    pids.push(c.id());
+                }
                 _ => child = None,
             }
         }
-        if !alive {
+        // While waiting for the game window, also list the install-dir processes
+        // (the window often belongs to the real game, not the bootstrapper).
+        if !alive || on_ready.is_some() {
             if let Some(dir) = &watch_dir {
-                alive = any_process_inside(&mut sys, dir);
+                let inside = pids_inside(&mut sys, dir);
+                alive |= !inside.is_empty();
+                pids.extend(inside);
             }
         }
 
         let now = Instant::now();
+        if on_ready.is_some() {
+            let window = alive && has_visible_window(&pids);
+            if window || now.duration_since(start) >= t.ready_timeout {
+                if let Some(cb) = on_ready.take() {
+                    cb(window);
+                }
+            }
+        }
         if alive {
             last_alive = now;
             misses = 0;
@@ -436,6 +573,10 @@ mod tests {
             last_played_at: None,
             session_count: 0,
             exe_missing: false,
+            description: String::new(),
+            cover_zoom: 1.0,
+            cover_x: 50.0,
+            cover_y: 50.0,
         };
         assert_eq!(watch_dir_for(&g), Some(PathBuf::from(r"D:\Jeux\Hero\bin")));
     }
@@ -447,6 +588,7 @@ mod tests {
             heartbeat_every: Duration::from_millis(500),
             startup_grace: Duration::from_millis(1500),
             misses_to_stop: 2,
+            ready_timeout: Duration::from_millis(1200),
         }
     }
 
@@ -461,6 +603,10 @@ mod tests {
                 cover_image_url: String::new(),
                 version: String::new(),
                 category: Category::Installed,
+                description: String::new(),
+                cover_zoom: 1.0,
+                cover_x: 50.0,
+                cover_y: 50.0,
             })
             .unwrap();
         let start = chrono::Utc::now();
@@ -479,8 +625,22 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let secs = watch_session(Some(child), None, &db, sid, start, fast_timing()).await;
+        // A console tool never shows a window: "ready" fires on timeout, once.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let c2 = calls.clone();
+        let on_ready: ReadyCallback = Box::new(move |w| c2.lock().unwrap().push(w));
+        let secs = watch_session(
+            Some(child),
+            None,
+            &db,
+            sid,
+            start,
+            fast_timing(),
+            Some(on_ready),
+        )
+        .await;
         assert!((2..=5).contains(&secs), "session lasted {secs}s");
+        assert_eq!(*calls.lock().unwrap(), vec![false]);
         db.finish_session(sid, &crate::db::now_rfc3339(), secs)
             .unwrap();
         assert_eq!(db.total_session_seconds(gid).unwrap(), secs);
@@ -518,12 +678,46 @@ mod tests {
             sid,
             start,
             fast_timing(),
+            None,
         )
         .await;
         assert!(
             (3..=7).contains(&secs),
             "session lasted {secs}s (bootstrapper not followed?)"
         );
+    }
+
+    /// A real top-level window of this process is seen; tool-less PIDs are not.
+    #[cfg(windows)]
+    #[test]
+    fn sees_visible_windows_of_given_pids() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        // SAFETY: standard window creation with a system class; destroyed below.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                class.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                320,
+                240,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null());
+        assert!(has_visible_window(&[std::process::id()]));
+        assert!(!has_visible_window(&[u32::MAX - 7]));
+        assert!(!has_visible_window(&[]));
+        // SAFETY: window created above on this thread.
+        unsafe { DestroyWindow(hwnd) };
     }
 
     #[test]

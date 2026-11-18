@@ -347,6 +347,54 @@ fn steam_games(skip: &HashSet<String>) -> Vec<Detected> {
     out
 }
 
+/// Steam app id of a game installed under `<library>\steamapps\common\<dir>`
+/// (`path` may be the install folder or anything inside it). Reads the
+/// library's `appmanifest_<id>.acf` files only.
+pub fn steam_app_id(path: &Path) -> Option<u32> {
+    let game_dir = path.ancestors().find(|a| {
+        a.parent()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n.eq_ignore_ascii_case("common"))
+            && a.parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .is_some_and(|n| n.eq_ignore_ascii_case("steamapps"))
+    })?;
+    let folder = game_dir.file_name()?.to_string_lossy().to_lowercase();
+    let apps = game_dir.parent()?.parent()?;
+    for e in std::fs::read_dir(apps).ok()?.flatten() {
+        let fname = e.file_name().to_string_lossy().to_lowercase();
+        let Some(id) = fname
+            .strip_prefix("appmanifest_")
+            .and_then(|f| f.strip_suffix(".acf"))
+            .and_then(|f| f.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        if parse_app_manifest(&text).is_some_and(|(_, dir, _)| dir.to_lowercase() == folder) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Official portrait cover (600x900) of a Steam game, served by Steam's CDN.
+pub fn steam_cover_url(app_id: u32) -> String {
+    format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/library_600x900_2x.jpg")
+}
+
+/// Automatic cover for a game, when one can be found from its install folder.
+pub fn auto_cover(install_dir: &str, executable_path: &str) -> Option<String> {
+    [install_dir, executable_path]
+        .iter()
+        .filter(|p| !p.is_empty())
+        .find_map(|p| steam_app_id(Path::new(p)))
+        .map(steam_cover_url)
+}
+
 // ------------------------------------------------------------------- Epic
 
 pub fn parse_epic_manifest(json: &str) -> Option<(String, PathBuf, PathBuf)> {
@@ -602,5 +650,31 @@ mod tests {
             key_for(Path::new(r"D:\Jeux\Game\")),
             key_for(Path::new("d:/jeux/game"))
         );
+    }
+
+    #[test]
+    fn finds_steam_cover_from_install_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let apps = t.path().join("SteamLibrary").join("steamapps");
+        let game = apps.join("common").join("Portal 2");
+        std::fs::create_dir_all(game.join("bin")).unwrap();
+        std::fs::write(
+            apps.join("appmanifest_620.acf"),
+            "\"AppState\"
+{
+	\"appid\"	\"620\"
+	\"name\"	\"Portal 2\"
+	\"installdir\"	\"Portal 2\"
+}",
+        )
+        .unwrap();
+        assert_eq!(steam_app_id(&game), Some(620));
+        assert_eq!(
+            steam_app_id(&game.join("bin").join("portal2.exe")),
+            Some(620)
+        );
+        assert_eq!(steam_app_id(t.path()), None);
+        let url = auto_cover("", &game.join("portal2.exe").to_string_lossy()).unwrap();
+        assert!(url.ends_with("/620/library_600x900_2x.jpg"));
     }
 }

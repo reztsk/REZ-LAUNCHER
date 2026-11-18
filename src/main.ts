@@ -1,8 +1,13 @@
 import "./styles.css";
-import { api, events, coverSrc, isTauri, installMock } from "./api";
+import "./fx.css";
+import { api, events, coverSrc, isTauri, installMock, toInput } from "./api";
 import type { Category, Detected, DriveInfo, Game, GameInput, LauncherInfo, RunningGame, ScannedExe, Settings } from "./api";
+import { openGameBox } from "./box3d";
+import { mountCarousel } from "./carousel";
+import { openCoverEditor } from "./cover-editor";
+import { coverHtml, generatedCover, type CoverLike } from "./covers";
 import { showDetections } from "./detection";
-import { esc, formatBytes, formatClock, formatPlaytime, formatRelative, formatSession, hueFrom, initials } from "./format";
+import { esc, formatBytes, formatClock, formatPlaytime, formatRelative, formatSession } from "./format";
 import { openGuide } from "./guide-modal";
 import { guideFor } from "./guides";
 import { icon } from "./icons";
@@ -10,6 +15,7 @@ import { launcherLogo } from "./launcher-logos";
 import { renderSettings } from "./settings-view";
 import { confirmModal, errorToast, openModal, toast } from "./ui";
 import { checkForUpdates, onUpdateStatus } from "./updates";
+import { showLaunch, type LaunchHandle } from "./launch-overlay";
 
 type View = "library" | "launchers" | "settings";
 type Filter = "all" | Category;
@@ -22,10 +28,11 @@ interface Persisted {
   sort: Sort;
   drive: string | null;
   guideDone: Record<string, number[]>;
+  carouselId: number | null;
 }
 
 function loadPersisted(): Persisted {
-  const fallback: Persisted = { filter: "all", sort: "recent", drive: null, guideDone: {} };
+  const fallback: Persisted = { filter: "all", sort: "recent", drive: null, guideDone: {}, carouselId: null };
   try {
     return { ...fallback, ...JSON.parse(localStorage.getItem(LS_KEY) ?? "{}") };
   } catch {
@@ -38,6 +45,12 @@ const DEFAULT_SETTINGS: Settings = {
   animations: true,
   tilt: true,
   ambient: true,
+  theme: "steel",
+  glass: true,
+  library_view: "grid",
+  launch_animation: true,
+  minimize_on_launch: true,
+  restore_on_exit: true,
   check_updates_on_start: true,
   detect_new_games: true,
   search_paths: [],
@@ -62,13 +75,24 @@ const state = {
   launching: new Set<number>(),
   settings: { ...DEFAULT_SETTINGS } as Settings,
   updateAvailable: false,
+  carouselId: persisted.carouselId,
+  /** Next carousel render fans the boxes out (view just opened). */
+  carouselIntro: true,
+  /** Launch animations in progress, by game id. */
+  launches: new Map<number, LaunchHandle>(),
 };
 
 function persist(): void {
   try {
     localStorage.setItem(
       LS_KEY,
-      JSON.stringify({ filter: state.filter, sort: state.sort, drive: state.drive, guideDone: state.guideDone }),
+      JSON.stringify({
+        filter: state.filter,
+        sort: state.sort,
+        drive: state.drive,
+        guideDone: state.guideDone,
+        carouselId: state.carouselId,
+      }),
     );
   } catch {
     /* storage unavailable: preferences just won't persist */
@@ -85,10 +109,15 @@ const CATEGORY_LABEL: Record<Category, string> = {
 };
 
 function withTransition(fn: () => void): void {
-  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+  type VT = { ready: Promise<void>; finished: Promise<void> };
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => VT };
   const reduced = !state.settings.animations || matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (doc.startViewTransition && !reduced) doc.startViewTransition(fn);
-  else fn();
+  if (doc.startViewTransition && !reduced) {
+    const t = doc.startViewTransition(fn);
+    // A newer transition skips this one: expected, not an error.
+    t.ready.catch(() => {});
+    t.finished.catch(() => {});
+  } else fn();
 }
 
 /* ============================== Settings ============================== */
@@ -99,10 +128,13 @@ function applyVisualPrefs(s: Settings): void {
   root.classList.toggle("no-anim", !s.animations);
   root.classList.toggle("no-tilt", !s.tilt);
   root.classList.toggle("no-ambient", !s.ambient);
+  root.classList.toggle("no-glass", !s.glass);
+  root.dataset.theme = s.theme;
 }
 
 async function saveSettings(patch: Partial<Settings>): Promise<void> {
   const prev = state.settings;
+  if (patch.library_view && patch.library_view !== prev.library_view) state.carouselIntro = true;
   state.settings = { ...prev, ...patch };
   applyVisualPrefs(state.settings);
   try {
@@ -119,7 +151,7 @@ async function saveSettings(patch: Partial<Settings>): Promise<void> {
 
 function renderShell(): void {
   app.innerHTML = `
-    <aside class="sidebar flex h-full flex-col px-[14px] py-6">
+    <aside class="sidebar liquid refract flex h-full flex-col px-[14px] py-6">
       <div class="flex items-center gap-3 px-2">
         <img src="/logo-mark.svg" alt="" class="h-10 w-10 drop-shadow-[0_0_12px_rgba(255,255,255,0.25)]" />
         <div class="leading-none">
@@ -188,6 +220,7 @@ function renderView(): void {
 function switchView(view: View): void {
   if (view === state.view && $("#view")!.childElementCount) return;
   state.view = view;
+  if (view === "library") state.carouselIntro = true;
   renderSidebar();
   $("#view")!.scrollTop = 0;
   withTransition(renderView);
@@ -240,10 +273,10 @@ function renderLibrary(): void {
       </header>
       <section id="hero-slot" class="mt-7"></section>
       <div class="mt-7 flex items-center justify-between gap-4">
-        <div id="tabs" class="tabs glass" role="tablist"></div>
+        <div id="tabs" class="tabs liquid" role="tablist"></div>
         <p id="result-count" class="text-xs text-muted"></p>
       </div>
-      <section id="grid" class="grid-games mt-6"></section>
+      <section id="grid" class="${state.settings.library_view === "carousel" ? "mt-4" : "grid-games mt-6"}"></section>
     </div>`;
 
   $<HTMLSelectElement>("#sort")!.value = state.sort;
@@ -275,7 +308,8 @@ function updateLibrary(animate: boolean): void {
     renderHero();
     renderGrid();
   };
-  if (animate) withTransition(run);
+  // The carousel animates itself; a page-wide view transition would ghost the 3D boxes.
+  if (animate && state.settings.library_view !== "carousel") withTransition(run);
   else run();
 }
 
@@ -322,26 +356,6 @@ function renderTabs(): void {
   );
 }
 
-/** Monochrome generated cover: steel gradient + grid + metal initials. */
-function generatedCover(title: string): string {
-  const h = hueFrom(title);
-  const l1 = 16 + (h % 18);
-  const angle = 120 + (h % 80);
-  return `<div class="gen" style="background:
-      radial-gradient(circle at 25% 15%, rgb(255 255 255 / .16), transparent 55%),
-      linear-gradient(${angle}deg, hsl(240 4% ${l1}%), hsl(240 5% 9%) 62%, #050506)">
-      <span class="mark" style="background:url(/logo-mark.svg) center/contain no-repeat;aspect-ratio:1"></span>
-      <span class="initials">${esc(initials(title))}</span>
-    </div>`;
-}
-
-function coverHtml(g: Game): string {
-  const src = coverSrc(g.cover_image_url);
-  return src
-    ? `<img class="cover-img" src="${esc(src)}" alt="" loading="lazy" draggable="false" data-title="${esc(g.title)}" />`
-    : generatedCover(g.title);
-}
-
 function canPlay(g: Game): boolean {
   return g.category !== "not_installed" && !!g.executable_path && !g.exe_missing;
 }
@@ -366,11 +380,14 @@ function cardHtml(g: Game, i: number): string {
     : `<span class="playtime" title="Dernière session : ${esc(formatRelative(g.last_played_at))}">${icon.clock}${playedLabel(g)}</span>`;
   const avg = g.session_count > 0 ? Math.round(g.playtime_minutes / g.session_count) : 0;
   const timed = g.category !== "launcher";
+  const boxMode = state.settings.library_view === "box3d";
+  const coverAction = boxMode ? "box" : canPlay(g) ? "play" : "toggle";
+  const coverTitle = boxMode ? "Voir la boîte 3D" : canPlay(g) ? "Jouer" : "Options";
 
   return `
   <article class="card ${isOpen ? "open" : ""} ${running ? "is-running" : ""}" data-id="${g.id}"
            style="--i:${enter ? Math.min(i, 16) : 0};${enter ? "" : "animation:none;"}view-transition-name:g-${g.id}">
-    <div class="cover" data-action="${canPlay(g) ? "play" : "toggle"}" title="${canPlay(g) ? "Jouer" : "Options"}">
+    <div class="cover" data-action="${coverAction}" title="${coverTitle}">
       ${coverHtml(g)}
       <div class="shade"></div>
       <div class="absolute left-2.5 top-2.5 flex flex-wrap gap-1.5">${badges.join("")}</div>
@@ -400,8 +417,9 @@ function cardHtml(g: Game, i: number): string {
         <div class="opt-row"><span>Version</span><span>${esc(g.version || "—")}</span></div>
         <div class="opt-row"><span>Catégorie</span><span>${CATEGORY_LABEL[g.category]}</span></div>
       </div>
-      <div class="mt-2 grid grid-cols-[1fr_auto_auto] gap-1.5">
+      <div class="mt-2 grid grid-cols-[1fr_auto_auto_auto] gap-1.5">
         <button class="btn btn-ghost btn-sm min-w-0 !px-2" data-action="open-folder" ${dir ? "" : "disabled"} title="Ouvrir l'emplacement : ${esc(dir)}">${icon.folder}<span class="truncate">Emplacement</span></button>
+        <button class="btn btn-ghost btn-sm !px-2.5" data-action="cover" title="Personnaliser la jaquette">${icon.image}</button>
         <button class="btn btn-ghost btn-sm !px-2.5" data-action="edit" title="Modifier">${icon.edit}</button>
         <button class="btn btn-danger btn-sm !px-2.5" data-action="delete" title="Supprimer">${icon.trash}</button>
       </div>
@@ -412,6 +430,8 @@ function cardHtml(g: Game, i: number): string {
 function renderGrid(): void {
   const grid = $("#grid")!;
   const list = visibleGames();
+  const carousel = state.settings.library_view === "carousel";
+  grid.className = carousel ? "mt-4" : "grid-games mt-6";
   $("#result-count")!.textContent = `${list.length} ${list.length > 1 ? "éléments" : "élément"}`;
   if (list.length === 0) {
     const emptyLib = state.games.length === 0;
@@ -434,14 +454,81 @@ function renderGrid(): void {
     grid.querySelector('[data-action="scan"]')?.addEventListener("click", () => void scanNow());
     return;
   }
+  if (carousel) {
+    mountCarousel(grid, {
+      games: list,
+      activeId: state.carouselId,
+      running: state.running,
+      // Fit the whole carousel + its info panel in the window height.
+      width: Math.max(
+        170,
+        Math.min({ compact: 196, normal: 232, large: 272 }[state.settings.card_size], Math.round((innerHeight - 500) * 0.75)),
+      ),
+      intro: state.carouselIntro,
+      canPlay,
+      playedLabel,
+      onActive: (id) => {
+        state.carouselId = id;
+        persist();
+      },
+      onPlay: (g) => void launch(g),
+      onBox: openBox,
+      onCover: (g) => void editCover(g),
+      onEdit: (g) => openGameForm(g),
+      onFolder: (g) => void openFolderOf(g),
+    });
+    state.carouselIntro = false;
+    tickTimers();
+    return;
+  }
   grid.innerHTML = list.map(cardHtml).join("");
   list.forEach((g) => state.seen.add(g.id));
   tickTimers();
 }
 
+function openBox(g: Game): void {
+  openGameBox(g, {
+    canPlay: (x) => canPlay(x) && !state.running.has(x.id),
+    onPlay: (x) => void launch(x),
+    onCover: (x) => void editCover(x),
+    onEdit: (x) => openGameForm(x),
+  });
+}
+
+async function openFolderOf(g: Game): Promise<void> {
+  try {
+    await api.openFolder(g.install_dir || g.executable_path);
+  } catch (err) {
+    errorToast(err, "Emplacement introuvable");
+  }
+}
+
+/** Cover editor on an existing game, saved right away. */
+async function editCover(g: Game): Promise<void> {
+  const res = await openCoverEditor(g, { pickImage: () => api.pickCover() });
+  if (!res) return;
+  try {
+    const saved = await api.updateGame(g.id, toInput(g, coverFields(res)));
+    replaceGame(saved);
+    toast("Jaquette mise à jour", saved.title);
+  } catch (err) {
+    errorToast(err, "Enregistrement impossible");
+  }
+}
+
+function coverFields(c: CoverLike): Pick<GameInput, "cover_image_url" | "cover_zoom" | "cover_x" | "cover_y"> {
+  return { cover_image_url: c.cover_image_url, cover_zoom: c.cover_zoom, cover_x: c.cover_x, cover_y: c.cover_y };
+}
+
+function replaceGame(saved: Game): void {
+  state.games = state.games.map((x) => (x.id === saved.id ? saved : x));
+  renderSidebar();
+  if (state.view === "library") updateLibrary(false);
+}
+
 function renderHero(): void {
   const slot = $("#hero-slot")!;
-  const showHero = state.filter === "all" && !state.search.trim();
+  const showHero = state.filter === "all" && !state.search.trim() && state.settings.library_view !== "carousel";
   const candidates = state.games.filter((g) => g.category === "installed" && g.last_played_at && canPlay(g));
   const g = candidates.sort((a, b) => b.last_played_at!.localeCompare(a.last_played_at!))[0];
   if (!showHero || !g) {
@@ -494,6 +581,10 @@ async function onGridClick(e: Event): Promise<void> {
   switch (actionEl.dataset.action) {
     case "play":
       return launch(game);
+    case "box":
+      return openBox(game);
+    case "cover":
+      return editCover(game);
     case "toggle": {
       const card = holder.classList.contains("card") ? holder : null;
       if (!card) return;
@@ -505,12 +596,7 @@ async function onGridClick(e: Event): Promise<void> {
       return;
     }
     case "open-folder":
-      try {
-        await api.openFolder(game.install_dir || game.executable_path);
-      } catch (err) {
-        errorToast(err, "Emplacement introuvable");
-      }
-      return;
+      return openFolderOf(game);
     case "edit":
       return openGameForm(game);
     case "delete": {
@@ -540,19 +626,35 @@ async function onGridClick(e: Event): Promise<void> {
 async function launch(game: Game): Promise<void> {
   if (state.launching.has(game.id) || state.running.has(game.id)) return;
   state.launching.add(game.id);
+  const timed = game.category !== "launcher";
+  const anim = timed && state.settings.launch_animation ? showLaunch(game) : null;
+  if (anim) state.launches.set(game.id, anim);
   try {
+    // Let the case open before the game grabs the screen.
+    if (anim) await new Promise((r) => setTimeout(r, 700));
     const rg = await api.launchGame(game.id);
-    if (game.category === "launcher") {
+    if (!timed) {
       toast(`${game.title} ouvert`, "Les launchers ne sont pas chronométrés.");
     } else {
+      anim?.started();
       onStarted(rg);
-      toast(`C'est parti : ${game.title}`, "Le chrono de ce jeu tourne. Bon jeu !");
+      if (!anim) toast(`C'est parti : ${game.title}`, "Le chrono de ce jeu tourne. Bon jeu !");
     }
   } catch (err) {
+    anim?.close();
+    state.launches.delete(game.id);
     errorToast(err, "Lancement impossible");
   } finally {
     state.launching.delete(game.id);
   }
+}
+
+/** Game window is up: finish the animation, stop costly rendering while playing. */
+function onReady(gameId: number): void {
+  const anim = state.launches.get(gameId);
+  state.launches.delete(gameId);
+  anim?.ready();
+  if (state.settings.minimize_on_launch) document.documentElement.classList.add("gaming");
 }
 
 function onStarted(rg: RunningGame): void {
@@ -601,7 +703,12 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
     cover_image_url: game?.cover_image_url ?? "",
     version: game?.version ?? prefill?.version ?? "",
     category: game?.category ?? "installed",
+    description: game?.description ?? "",
+    cover_zoom: game?.cover_zoom ?? 1,
+    cover_x: game?.cover_x ?? 50,
+    cover_y: game?.cover_y ?? 50,
   };
+  const framing = { cover_zoom: v.cover_zoom, cover_x: v.cover_x, cover_y: v.cover_y };
   const seg = (c: Category, label: string) =>
     `<label><input type="radio" name="category" value="${c}" ${v.category === c ? "checked" : ""}/><span>${label}</span></label>`;
 
@@ -609,8 +716,8 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
     game ? "Modifier le jeu" : "Ajouter un jeu",
     `<form id="game-form" class="grid grid-cols-[132px_1fr] gap-5" autocomplete="off">
       <div>
-        <div id="f-preview" class="cover !cursor-default">${coverPreview(v.title, v.cover_image_url)}</div>
-        <button type="button" class="btn btn-ghost btn-sm mt-2 w-full" id="f-pick-cover">${icon.image}Image locale</button>
+        <div id="f-preview" class="cover !cursor-pointer" title="Personnaliser la jaquette">${coverPreview(v.title, v.cover_image_url, framing)}</div>
+        <button type="button" class="btn btn-ghost btn-sm mt-2 w-full" id="f-edit-cover">${icon.image}Jaquette…</button>
       </div>
       <div class="flex flex-col gap-3.5">
         <div><label class="label" for="f-title">Titre</label>
@@ -630,6 +737,8 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
           <input id="f-cover" name="cover_image_url" class="field" value="${esc(v.cover_image_url)}" placeholder="https://… (format portrait 3:4 conseillé)" spellcheck="false" /></div>
         <div><span class="label">Catégorie</span>
           <div class="seg">${seg("installed", "Installé")}${seg("not_installed", "Non installé")}${seg("launcher", "Launcher")}</div></div>
+        <div><label class="label" for="f-desc">Description <span class="normal-case tracking-normal text-white/30">(dos de la boîte 3D)</span></label>
+          <textarea id="f-desc" name="description" class="field !h-20 resize-none !py-2.5 leading-snug" maxlength="4000" placeholder="Résumé, souvenirs, objectifs…">${esc(v.description)}</textarea></div>
       </div>
       <div class="col-span-2 mt-1 flex justify-end gap-2 border-t border-white/5 pt-4">
         <button type="button" class="btn btn-ghost" data-close>Annuler</button>
@@ -641,10 +750,25 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
   const form = $<HTMLFormElement>("#game-form", m.el)!;
   const field = (n: string) => form.elements.namedItem(n) as HTMLInputElement;
   const refreshPreview = () => {
-    $("#f-preview", m.el)!.innerHTML = coverPreview(field("title").value, field("cover_image_url").value);
+    $("#f-preview", m.el)!.innerHTML = coverPreview(field("title").value, field("cover_image_url").value, framing);
   };
+  const editFormCover = async () => {
+    const res = await openCoverEditor(
+      { title: field("title").value || "?", cover_image_url: field("cover_image_url").value.trim(), ...framing },
+      { pickImage: () => api.pickCover() },
+    );
+    if (!res) return;
+    field("cover_image_url").value = res.cover_image_url;
+    Object.assign(framing, { cover_zoom: res.cover_zoom, cover_x: res.cover_x, cover_y: res.cover_y });
+    refreshPreview();
+  };
+  $("#f-preview", m.el)!.addEventListener("click", () => void editFormCover());
+  $("#f-edit-cover", m.el)!.addEventListener("click", () => void editFormCover());
   field("title").addEventListener("input", refreshPreview);
-  field("cover_image_url").addEventListener("change", refreshPreview);
+  field("cover_image_url").addEventListener("change", () => {
+    Object.assign(framing, { cover_zoom: 1, cover_x: 50, cover_y: 50 });
+    refreshPreview();
+  });
 
   $("#f-browse", m.el)!.addEventListener("click", async () => {
     try {
@@ -655,17 +779,6 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
       if (!field("version").value) field("version").value = s.version;
       if (!field("title").value) field("title").value = s.title;
       refreshPreview();
-    } catch (err) {
-      errorToast(err);
-    }
-  });
-  $("#f-pick-cover", m.el)!.addEventListener("click", async () => {
-    try {
-      const p = await api.pickCover();
-      if (p) {
-        field("cover_image_url").value = p;
-        refreshPreview();
-      }
     } catch (err) {
       errorToast(err);
     }
@@ -681,6 +794,8 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
       cover_image_url: String(fd.get("cover_image_url") ?? ""),
       version: String(fd.get("version") ?? ""),
       category: String(fd.get("category") ?? "installed") as Category,
+      description: String(fd.get("description") ?? ""),
+      ...framing,
     };
     const submit = form.querySelector<HTMLButtonElement>('[type="submit"]')!;
     submit.disabled = true;
@@ -699,11 +814,8 @@ function openGameForm(game?: Game, prefill?: ScannedExe): void {
   });
 }
 
-function coverPreview(title: string, url: string): string {
-  const src = coverSrc(url.trim());
-  return src
-    ? `<img class="cover-img" src="${esc(src)}" alt="" data-title="${esc(title || "?")}" />`
-    : generatedCover(title || "?");
+function coverPreview(title: string, url: string, f: Pick<CoverLike, "cover_zoom" | "cover_x" | "cover_y">): string {
+  return coverHtml({ title: title || "?", cover_image_url: url.trim(), ...f }, false);
 }
 
 /* ============================== Launchers ============================== */
@@ -868,6 +980,10 @@ async function onLauncherClick(e: Event): Promise<void> {
           cover_image_url: "",
           version: "",
           category: "launcher",
+          description: "",
+          cover_zoom: 1,
+          cover_x: 50,
+          cover_y: 50,
         });
         state.games.push(g);
         renderSidebar();
@@ -960,6 +1076,27 @@ async function setupDragDrop(): Promise<void> {
   });
 }
 
+/** Specular highlight of the glass panels follows the pointer. */
+function setupGlassHighlight(): void {
+  let pending = false;
+  let x = 0;
+  let y = 0;
+  document.addEventListener("pointermove", (e) => {
+    x = e.clientX;
+    y = e.clientY;
+    if (pending || !state.settings.glass) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      document.querySelectorAll<HTMLElement>(".liquid").forEach((el) => {
+        const r = el.getBoundingClientRect();
+        el.style.setProperty("--gx", `${x - r.left}px`);
+        el.style.setProperty("--gy", `${y - r.top}px`);
+      });
+    });
+  });
+}
+
 async function boot(): Promise<void> {
   if (!isTauri()) {
     const m = await import("./mock");
@@ -1000,8 +1137,12 @@ async function boot(): Promise<void> {
   }
 
   await events.onGameStarted(onStarted);
+  await events.onGameReady(({ game_id }) => onReady(game_id));
   await events.onGameStopped(({ game, session_seconds }) => {
+    state.launches.get(game.id)?.close();
+    state.launches.delete(game.id);
     state.running.delete(game.id);
+    if (state.running.size === 0) document.documentElement.classList.remove("gaming");
     state.games = state.games.map((g) => (g.id === game.id ? game : g));
     renderSidebar();
     updateLibrary(true);
@@ -1023,6 +1164,10 @@ async function boot(): Promise<void> {
   });
 
   setInterval(tickTimers, 1000);
+  // Back in REZ launcher during a game: animate again.
+  window.addEventListener("focus", () => document.documentElement.classList.remove("gaming"));
+  setupGlassHighlight();
+  void api.fillMissingCovers().then((changed) => changed.forEach(replaceGame), () => {});
   state.view = state.settings.start_view;
   renderSidebar();
   renderView();

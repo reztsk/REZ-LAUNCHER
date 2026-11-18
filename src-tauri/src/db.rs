@@ -57,6 +57,13 @@ pub struct Game {
     pub session_count: i64,
     /// Computed at read time: the executable is set but not found on disk.
     pub exe_missing: bool,
+    /// Free text shown on the back of the 3D game box.
+    pub description: String,
+    /// Cover framing set in the cover editor: zoom (1..=4) around a focal point
+    /// given in % of the image (0..=100). Display-only, the image file is untouched.
+    pub cover_zoom: f64,
+    pub cover_x: f64,
+    pub cover_y: f64,
 }
 
 /// Payload used to create or update a game.
@@ -72,6 +79,30 @@ pub struct GameInput {
     #[serde(default)]
     pub version: String,
     pub category: Category,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_zoom")]
+    pub cover_zoom: f64,
+    #[serde(default = "default_center")]
+    pub cover_x: f64,
+    #[serde(default = "default_center")]
+    pub cover_y: f64,
+}
+
+fn default_zoom() -> f64 {
+    1.0
+}
+fn default_center() -> f64 {
+    50.0
+}
+
+/// Keep a cover framing value finite and inside `min..=max`.
+fn clamp_or(v: f64, min: f64, max: f64, fallback: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(min, max)
+    } else {
+        fallback
+    }
 }
 
 impl GameInput {
@@ -82,6 +113,15 @@ impl GameInput {
         self.install_dir = self.install_dir.trim().trim_matches('"').to_string();
         self.cover_image_url = self.cover_image_url.trim().to_string();
         self.version = self.version.trim().to_string();
+        self.description = self.description.trim().to_string();
+        self.cover_zoom = clamp_or(self.cover_zoom, 1.0, 4.0, 1.0);
+        self.cover_x = clamp_or(self.cover_x, 0.0, 100.0, 50.0);
+        self.cover_y = clamp_or(self.cover_y, 0.0, 100.0, 50.0);
+        if self.description.chars().count() > 4000 {
+            return Err(AppError::Invalid(
+                "Description trop longue (4000 caractères max).".into(),
+            ));
+        }
 
         if self.title.is_empty() {
             return Err(AppError::Invalid("Le titre est obligatoire.".into()));
@@ -130,7 +170,8 @@ pub struct Database {
 const GAME_COLUMNS: &str = "id, title, executable_path, install_dir, cover_image_url, version, \
                             playtime_minutes, category, added_at, last_played_at, \
                             (SELECT COUNT(*) FROM sessions s WHERE s.game_id = games.id \
-                             AND s.duration_seconds > 0) AS session_count";
+                             AND s.duration_seconds > 0) AS session_count, \
+                            description, cover_zoom, cover_x, cover_y";
 
 fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
     let category: String = row.get(7)?;
@@ -149,6 +190,10 @@ fn row_to_game(row: &Row<'_>) -> rusqlite::Result<Game> {
         last_played_at: row.get(9)?,
         session_count: row.get(10)?,
         exe_missing,
+        description: row.get(11)?,
+        cover_zoom: row.get(12)?,
+        cover_x: row.get(13)?,
+        cover_y: row.get(14)?,
     })
 }
 
@@ -216,6 +261,21 @@ impl Database {
                  first_seen      TEXT NOT NULL
              );",
         )?;
+        // v0.3.0 columns (older databases are upgraded in place).
+        let existing: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('games')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for (col, ddl) in [
+            ("description", "TEXT NOT NULL DEFAULT ''"),
+            ("cover_zoom", "REAL NOT NULL DEFAULT 1"),
+            ("cover_x", "REAL NOT NULL DEFAULT 50"),
+            ("cover_y", "REAL NOT NULL DEFAULT 50"),
+        ] {
+            if !existing.iter().any(|c| c == col) {
+                conn.execute_batch(&format!("ALTER TABLE games ADD COLUMN {col} {ddl};"))?;
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -254,8 +314,9 @@ impl Database {
         let id = {
             let conn = self.conn();
             conn.execute(
-                "INSERT INTO games (title, executable_path, install_dir, cover_image_url, version, category, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO games (title, executable_path, install_dir, cover_image_url, version, category,
+                                    added_at, description, cover_zoom, cover_x, cover_y)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     g.title,
                     g.executable_path,
@@ -263,7 +324,11 @@ impl Database {
                     g.cover_image_url,
                     g.version,
                     g.category.as_str(),
-                    now_rfc3339()
+                    now_rfc3339(),
+                    g.description,
+                    g.cover_zoom,
+                    g.cover_x,
+                    g.cover_y
                 ],
             )?;
             conn.last_insert_rowid()
@@ -275,8 +340,9 @@ impl Database {
         let g = input.normalized()?;
         let changed = self.conn().execute(
             "UPDATE games SET title = ?1, executable_path = ?2, install_dir = ?3,
-                    cover_image_url = ?4, version = ?5, category = ?6
-             WHERE id = ?7",
+                    cover_image_url = ?4, version = ?5, category = ?6,
+                    description = ?7, cover_zoom = ?8, cover_x = ?9, cover_y = ?10
+             WHERE id = ?11",
             params![
                 g.title,
                 g.executable_path,
@@ -284,6 +350,10 @@ impl Database {
                 g.cover_image_url,
                 g.version,
                 g.category.as_str(),
+                g.description,
+                g.cover_zoom,
+                g.cover_x,
+                g.cover_y,
                 id
             ],
         )?;
@@ -291,6 +361,15 @@ impl Database {
             return Err(AppError::GameNotFound(id));
         }
         self.get_game(id)
+    }
+
+    /// Set a cover only if the game has none yet (automatic covers never
+    /// override the user's choice). Returns true when it was set.
+    pub fn set_cover_if_empty(&self, id: i64, url: &str) -> AppResult<bool> {
+        Ok(self.conn().execute(
+            "UPDATE games SET cover_image_url = ?1 WHERE id = ?2 AND cover_image_url = ''",
+            params![url, id],
+        )? > 0)
     }
 
     pub fn delete_game(&self, id: i64) -> AppResult<()> {
@@ -582,7 +661,53 @@ mod tests {
             cover_image_url: String::new(),
             version: "1.0".into(),
             category: cat,
+            description: String::new(),
+            cover_zoom: 1.0,
+            cover_x: 50.0,
+            cover_y: 50.0,
         }
+    }
+
+    #[test]
+    fn cover_framing_is_clamped_and_saved() {
+        let db = Database::open_in_memory().unwrap();
+        let mut i = input("Framed", r"D:\Jeux\F\f.exe", Category::Installed);
+        i.cover_zoom = 9.0;
+        i.cover_x = -5.0;
+        i.cover_y = f64::NAN;
+        i.description = "  Un jeu.  ".into();
+        let g = db.insert_game(i).unwrap();
+        assert_eq!((g.cover_zoom, g.cover_x, g.cover_y), (4.0, 0.0, 50.0));
+        assert_eq!(g.description, "Un jeu.");
+        assert!(db.set_cover_if_empty(g.id, "https://x/c.jpg").unwrap());
+        assert!(!db.set_cover_if_empty(g.id, "https://x/other.jpg").unwrap());
+        assert_eq!(
+            db.get_game(g.id).unwrap().cover_image_url,
+            "https://x/c.jpg"
+        );
+    }
+
+    #[test]
+    fn old_databases_get_new_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.sqlite3");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE games (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                   executable_path TEXT NOT NULL DEFAULT '', install_dir TEXT NOT NULL DEFAULT '',
+                   cover_image_url TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '',
+                   playtime_minutes INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT 'installed',
+                   added_at TEXT NOT NULL, last_played_at TEXT);
+                 INSERT INTO games (title, added_at, category) VALUES ('Legacy', '2025-01-01T00:00:00Z', 'not_installed');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let g = &db.list_games().unwrap()[0];
+        assert_eq!(g.title, "Legacy");
+        assert_eq!((g.cover_zoom, g.cover_x, g.cover_y), (1.0, 50.0, 50.0));
+        assert_eq!(g.description, "");
     }
 
     #[test]

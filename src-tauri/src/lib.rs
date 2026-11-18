@@ -56,6 +56,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_games,
             commands::add_game,
+            commands::fill_missing_covers,
             commands::update_game,
             commands::delete_game,
             commands::launch_game,

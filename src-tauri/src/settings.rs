@@ -26,6 +26,32 @@ pub enum StartView {
     Launchers,
 }
 
+/// How the library is displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryView {
+    /// Cover grid (click = play).
+    #[default]
+    Grid,
+    /// Cover grid, click opens an interactive 3D game box.
+    Box3d,
+    /// Horizontal 3D carousel of game boxes.
+    Carousel,
+}
+
+/// Accent colour duo / gradient of the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Steel,
+    Cyan,
+    Neon,
+    Carbon,
+    Ember,
+    Glacier,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -34,6 +60,17 @@ pub struct Settings {
     pub animations: bool,
     pub tilt: bool,
     pub ambient: bool,
+    pub theme: Theme,
+    /// Frosted "Apple glass" on the sidebar and category tabs.
+    pub glass: bool,
+    pub library_view: LibraryView,
+    // Game launch
+    /// Full-screen box-opening animation + loading bar until the game window shows.
+    pub launch_animation: bool,
+    /// Minimize REZ launcher once the game is up.
+    pub minimize_on_launch: bool,
+    /// Bring REZ launcher back when the game closes.
+    pub restore_on_exit: bool,
     // Updates
     pub check_updates_on_start: bool,
     // Game detection (read-only scan of launcher manifests + these folders)
@@ -52,6 +89,12 @@ impl Default for Settings {
             animations: true,
             tilt: true,
             ambient: true,
+            theme: Theme::Steel,
+            glass: true,
+            library_view: LibraryView::Grid,
+            launch_animation: true,
+            minimize_on_launch: true,
+            restore_on_exit: true,
             check_updates_on_start: true,
             detect_new_games: true,
             search_paths: Vec::new(),
@@ -134,6 +177,24 @@ mod tests {
         let s = Settings::load(&db);
         assert!(!s.tilt);
         assert!(s.animations);
+        assert!(s.minimize_on_launch && s.restore_on_exit);
+        assert_eq!(s.library_view, LibraryView::Grid);
+    }
+
+    #[test]
+    fn view_modes_and_themes_serialize_lowercase() {
+        let s = Settings {
+            library_view: LibraryView::Box3d,
+            theme: Theme::Glacier,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""library_view":"box3d""#));
+        assert!(json.contains(r#""theme":"glacier""#));
+        let back: Settings =
+            serde_json::from_str(r#"{"library_view":"carousel","theme":"cyan"}"#).unwrap();
+        assert_eq!(back.library_view, LibraryView::Carousel);
+        assert_eq!(back.theme, Theme::Cyan);
     }
 
     #[test]

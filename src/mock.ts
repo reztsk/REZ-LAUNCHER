@@ -1,6 +1,22 @@
 // In-memory backend used only when the UI is opened in a plain browser
 // (`npm run dev` without Tauri) — handy for UI work and screenshots.
-import type { Api, Detected, Events, Game, GameInput, GameStopped, RunningGame, Settings, UpdateProgress } from "./api";
+import type { Api, Detected, Events, Game, GameInput, GameReady, GameStopped, RunningGame, Settings, UpdateProgress } from "./api";
+
+/** Demo artwork (SVG data URL) so covers, the 3D box and the editor have real images. */
+function art(title: string, a: string, b: string, wide = false): string {
+  const [w, h] = wide ? [1600, 900] : [600, 800];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="#050506"/></linearGradient>
+    <radialGradient id="s" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="${b}" stop-opacity="0"/></radialGradient></defs>
+    <rect width="100%" height="100%" fill="url(#g)"/>
+    <circle cx="${w * 0.62}" cy="${h * 0.36}" r="${h * 0.22}" fill="url(#s)" opacity=".85"/>
+    <path d="M0 ${h * 0.72} L${w * 0.18} ${h * 0.5} L${w * 0.34} ${h * 0.66} L${w * 0.55} ${h * 0.42} L${w * 0.8} ${h * 0.68} L${w} ${h * 0.55} V${h} H0Z" fill="#0b0b0e" opacity=".92"/>
+    <path d="M0 ${h * 0.86} L${w * 0.3} ${h * 0.7} L${w * 0.62} ${h * 0.84} L${w} ${h * 0.72} V${h} H0Z" fill="#000"/>
+    <text x="50%" y="${h * 0.16}" text-anchor="middle" font-family="Segoe UI, sans-serif" font-weight="800" font-size="${h * 0.075}" letter-spacing="6" fill="#fff">${title.toUpperCase()}</text>
+  </svg>`;
+  return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+}
+const framing = { description: "", cover_zoom: 1, cover_x: 50, cover_y: 50 };
 
 const now = Date.now();
 const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
@@ -8,12 +24,12 @@ const H = 3_600_000;
 
 let nextId = 7;
 const games: Game[] = [
-  { id: 1, title: "Neon Drift", executable_path: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift\\NeonDrift.exe", install_dir: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift", cover_image_url: "", version: "1.4.2", playtime_minutes: 2535, category: "installed", added_at: iso(900 * H), last_played_at: iso(3 * H), exe_missing: false, session_count: 37 },
-  { id: 2, title: "Hollow Depths", executable_path: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths\\hollow.exe", install_dir: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths", cover_image_url: "", version: "1.5.78", playtime_minutes: 4210, category: "installed", added_at: iso(1200 * H), last_played_at: iso(30 * H), exe_missing: false, session_count: 52 },
-  { id: 3, title: "Starfall Tactics", executable_path: "", install_dir: "", cover_image_url: "", version: "", playtime_minutes: 610, category: "not_installed", added_at: iso(400 * H), last_played_at: iso(800 * H), exe_missing: false, session_count: 9 },
-  { id: 4, title: "Steam", executable_path: "D:\\Jeux\\Steam\\steam.exe", install_dir: "D:\\Jeux\\Steam", cover_image_url: "", version: "", playtime_minutes: 0, category: "launcher", added_at: iso(1500 * H), last_played_at: null, exe_missing: false, session_count: 0 },
-  { id: 5, title: "Circuit Breakers", executable_path: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers\\CB-Win64-Shipping.exe", install_dir: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers", cover_image_url: "", version: "2.0.1", playtime_minutes: 95, category: "installed", added_at: iso(50 * H), last_played_at: iso(48 * H), exe_missing: false, session_count: 3 },
-  { id: 6, title: "Pixel Odyssey", executable_path: "", install_dir: "", cover_image_url: "", version: "", playtime_minutes: 0, category: "not_installed", added_at: iso(10 * H), last_played_at: null, exe_missing: false, session_count: 0 },
+  { id: 1, title: "Neon Drift", executable_path: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift\\NeonDrift.exe", install_dir: "D:\\Jeux\\Steam\\steamapps\\common\\Neon Drift", cover_image_url: art("Neon Drift", "#0e7490", "#22d3ee"), version: "1.4.2", playtime_minutes: 2535, category: "installed", added_at: iso(900 * H), last_played_at: iso(3 * H), exe_missing: false, session_count: 37, ...framing, description: "Course futuriste dans une mégapole de néons. Drift, boost et duels en ligne à 200 km/h.\n\nObjectif : finir la ligue Platine." },
+  { id: 2, title: "Hollow Depths", executable_path: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths\\hollow.exe", install_dir: "D:\\Jeux\\GOGGalaxy\\Games\\Hollow Depths", cover_image_url: art("Hollow Depths", "#3f3f46", "#e4e4e7"), version: "1.5.78", playtime_minutes: 4210, category: "installed", added_at: iso(1200 * H), last_played_at: iso(30 * H), exe_missing: false, session_count: 52, ...framing },
+  { id: 3, title: "Starfall Tactics", executable_path: "", install_dir: "", cover_image_url: "", version: "", playtime_minutes: 610, category: "not_installed", added_at: iso(400 * H), last_played_at: iso(800 * H), exe_missing: false, session_count: 9, ...framing },
+  { id: 4, title: "Steam", executable_path: "D:\\Jeux\\Steam\\steam.exe", install_dir: "D:\\Jeux\\Steam", cover_image_url: "", version: "", playtime_minutes: 0, category: "launcher", added_at: iso(1500 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing },
+  { id: 5, title: "Circuit Breakers", executable_path: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers\\CB-Win64-Shipping.exe", install_dir: "D:\\Jeux\\EpicGames\\Games\\CircuitBreakers", cover_image_url: art("Circuit Breakers", "#b45309", "#fbbf24"), version: "2.0.1", playtime_minutes: 95, category: "installed", added_at: iso(50 * H), last_played_at: iso(48 * H), exe_missing: false, session_count: 3, ...framing },
+  { id: 6, title: "Pixel Odyssey", executable_path: "", install_dir: "", cover_image_url: "", version: "", playtime_minutes: 0, category: "not_installed", added_at: iso(10 * H), last_played_at: null, exe_missing: false, session_count: 0, ...framing },
 ];
 const running = new Map<number, RunningGame>();
 const params = new URLSearchParams(location.search);
@@ -27,6 +43,12 @@ let settings: Settings = {
   search_paths: ["D:\\Jeux"],
   start_view: (params.get("view") as Settings["start_view"]) ?? "library",
   launch_at_startup: false,
+  theme: (params.get("theme") as Settings["theme"]) ?? "steel",
+  glass: true,
+  library_view: (params.get("mode") as Settings["library_view"]) ?? "grid",
+  launch_animation: true,
+  minimize_on_launch: true,
+  restore_on_exit: true,
 };
 const det = (title: string, source: Detected["source"], dir: string, exe: string): Detected => ({
   key: dir.toLowerCase(),
@@ -42,6 +64,7 @@ let detections: Detected[] = [
 ];
 const progressCbs: ((p: UpdateProgress) => void)[] = [];
 const startedCbs: ((p: RunningGame) => void)[] = [];
+const readyCbs: ((p: GameReady) => void)[] = [];
 const stoppedCbs: ((p: GameStopped) => void)[] = [];
 
 const delay = <T>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -56,7 +79,7 @@ export const mockApi: Api = {
   listGames: () => delay(games),
   addGame: (input) => {
     if (!input.title.trim()) return Promise.reject("Le titre est obligatoire.");
-    const g = apply({ id: nextId++, playtime_minutes: 0, added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0 } as Game, input);
+    const g = apply({ id: nextId++, playtime_minutes: 0, added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing } as Game, input);
     games.push(g);
     return delay(g);
   },
@@ -72,21 +95,23 @@ export const mockApi: Api = {
     if (g.category !== "launcher") {
       running.set(id, rg);
       startedCbs.forEach((cb) => cb(rg));
-      // Simulated 8 s session.
+      // Simulated session: window shows after ~3 s, game closes after 12 s.
+      setTimeout(() => readyCbs.forEach((cb) => cb({ game_id: id, window: true })), 3000);
       setTimeout(() => {
         running.delete(id);
         g.playtime_minutes += 1;
         g.session_count += 1;
         g.last_played_at = new Date().toISOString();
         stoppedCbs.forEach((cb) => cb({ game: structuredClone(g), session_seconds: 68 }));
-      }, 8000);
+      }, 12000);
     }
     return delay(rg);
   },
   runningGames: () => delay([...running.values()]),
   openFolder: () => delay(undefined),
   scanExecutable: () => delay({ title: "Demo Game", executable_path: "D:\\Jeux\\Demo\\demo.exe", install_dir: "D:\\Jeux\\Demo", version: "1.0.0" }),
-  pickCover: () => delay(null),
+  pickCover: () => delay(art("Import", "#1e3a8a", "#7dd3fc", true)),
+  fillMissingCovers: () => delay([]),
   listLaunchers: () =>
     delay([
       { id: "steam", name: "Steam", publisher: "Valve", download_url: "https://store.steampowered.com/about/", recommended_folder: "Steam", detected_exe: "D:\\Jeux\\Steam\\steam.exe" },
@@ -116,7 +141,7 @@ export const mockApi: Api = {
     detections = detections.filter((d) => !keys.includes(d.key) || action === "later");
     if (action !== "add") return delay([]);
     const added = picked.map((d) => {
-      const g: Game = { id: nextId++, title: d.title, executable_path: d.executable_path, install_dir: d.install_dir, cover_image_url: "", version: "", playtime_minutes: 0, category: "installed", added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0 };
+      const g: Game = { id: nextId++, title: d.title, executable_path: d.executable_path, install_dir: d.install_dir, cover_image_url: "", version: "", playtime_minutes: 0, category: "installed", added_at: new Date().toISOString(), last_played_at: null, exe_missing: false, session_count: 0, ...framing };
       games.push(g);
       return g;
     });
@@ -152,6 +177,10 @@ export const mockApi: Api = {
 export const mockEvents: Events = {
   onGameStarted: (cb) => {
     startedCbs.push(cb);
+    return Promise.resolve(() => {});
+  },
+  onGameReady: (cb) => {
+    readyCbs.push(cb);
     return Promise.resolve(() => {});
   },
   onGameStopped: (cb) => {

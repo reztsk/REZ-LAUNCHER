@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.0
+
+- **Fenêtre automatique pendant le jeu** : REZ launcher se réduit dans la barre des tâches dès que la fenêtre du jeu apparaît, coupe ses animations, puis revient au premier plan à la fermeture du jeu (réglable dans *Paramètres › Lancement des jeux*).
+- **Animation de lancement** : la boîte du jeu s'ouvre en plein écran, une barre de chargement suit le démarrage jusqu'à l'apparition de la fenêtre du jeu (détectée en lecture seule, comme Alt+Tab), puis bascule automatique vers le jeu.
+- **Éditeur de jaquette** : importe une image (ou une URL), puis déplace, zoome et centre-la en direct dans le cadre. L'image d'origine n'est jamais modifiée.
+- **Une jaquette pour chaque jeu** : les jeux Steam reçoivent automatiquement leur jaquette officielle ; les autres ont une jaquette générée avec leur titre.
+- **Mode « Boîte 3D »** : un clic sur un jeu ouvre sa boîte en 3D, à faire tourner à la souris. La face montre la jaquette, la tranche le titre en relief, et le dos une description sur fond flouté.
+- **Mode « Carrousel 3D »** : tes jeux en boîtes 3D sur un carrousel horizontal (molette, flèches, glisser).
+- **Thèmes** : Acier, Cyber cyan, Néon, Carbone, Ambre, Glacier.
+- **Effet verre Apple** : verre givré, reflets qui suivent la souris et bordures lumineuses sur la barre latérale et les catégories.
+- Description personnalisable pour chaque jeu (dos de la boîte).
+
 ## v0.2.0
 
 GameREZ devient **REZ launcher**.

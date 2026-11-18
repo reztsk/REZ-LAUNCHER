@@ -18,6 +18,12 @@ export interface Game {
   /** Recorded play sessions for this game. */
   session_count: number;
   exe_missing: boolean;
+  /** Shown on the back of the 3D game box. */
+  description: string;
+  /** Cover framing (cover editor): zoom 1..4 around a focal point in % of the image. */
+  cover_zoom: number;
+  cover_x: number;
+  cover_y: number;
 }
 
 export interface GameInput {
@@ -27,6 +33,16 @@ export interface GameInput {
   cover_image_url: string;
   version: string;
   category: Category;
+  description: string;
+  cover_zoom: number;
+  cover_x: number;
+  cover_y: number;
+}
+
+/** Editable payload of an existing game. */
+export function toInput(g: Game, patch: Partial<GameInput> = {}): GameInput {
+  const { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y } = g;
+  return { title, executable_path, install_dir, cover_image_url, version, category, description, cover_zoom, cover_x, cover_y, ...patch };
 }
 
 export interface ScannedExe {
@@ -39,6 +55,12 @@ export interface ScannedExe {
 export interface RunningGame {
   game_id: number;
   started_at: string;
+}
+
+export interface GameReady {
+  game_id: number;
+  /** false when REZ launcher stopped waiting without seeing a game window. */
+  window: boolean;
 }
 
 export interface GameStopped {
@@ -65,12 +87,20 @@ export interface DriveInfo {
 
 export type CardSize = "compact" | "normal" | "large";
 export type StartView = "library" | "launchers";
+export type LibraryView = "grid" | "box3d" | "carousel";
+export type ThemeId = "steel" | "cyan" | "neon" | "carbon" | "ember" | "glacier";
 
 export interface Settings {
   card_size: CardSize;
   animations: boolean;
   tilt: boolean;
   ambient: boolean;
+  theme: ThemeId;
+  glass: boolean;
+  library_view: LibraryView;
+  launch_animation: boolean;
+  minimize_on_launch: boolean;
+  restore_on_exit: boolean;
   check_updates_on_start: boolean;
   detect_new_games: boolean;
   search_paths: string[];
@@ -109,6 +139,7 @@ export interface CacheReport {
 const tauriApi = {
   listGames: () => invoke<Game[]>("list_games"),
   addGame: (input: GameInput) => invoke<Game>("add_game", { input }),
+  fillMissingCovers: () => invoke<Game[]>("fill_missing_covers"),
   updateGame: (id: number, input: GameInput) => invoke<Game>("update_game", { id, input }),
   deleteGame: (id: number) => invoke<void>("delete_game", { id }),
   launchGame: (id: number) => invoke<RunningGame>("launch_game", { id }),
@@ -138,6 +169,8 @@ const tauriApi = {
 const tauriEvents = {
   onGameStarted: (cb: (p: RunningGame) => void): Promise<UnlistenFn> =>
     listen<RunningGame>("game-started", (e) => cb(e.payload)),
+  onGameReady: (cb: (p: GameReady) => void): Promise<UnlistenFn> =>
+    listen<GameReady>("game-ready", (e) => cb(e.payload)),
   onGameStopped: (cb: (p: GameStopped) => void): Promise<UnlistenFn> =>
     listen<GameStopped>("game-stopped", (e) => cb(e.payload)),
   onGamesDetected: (cb: (p: Detected[]) => void): Promise<UnlistenFn> =>

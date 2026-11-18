@@ -35,8 +35,37 @@ pub fn list_games(state: State<'_, AppState>) -> AppResult<Vec<Game>> {
 }
 
 #[tauri::command]
-pub fn add_game(state: State<'_, AppState>, input: GameInput) -> AppResult<Game> {
+pub fn add_game(state: State<'_, AppState>, mut input: GameInput) -> AppResult<Game> {
+    if input.cover_image_url.trim().is_empty() {
+        if let Some(url) = detect::auto_cover(&input.install_dir, &input.executable_path) {
+            input.cover_image_url = url;
+        }
+    }
     state.db.insert_game(input)
+}
+
+/// Give a cover to every game that has none and can get one automatically
+/// (official Steam artwork, found from the read-only Steam manifests).
+/// Returns the games that changed.
+#[tauri::command]
+pub async fn fill_missing_covers(state: State<'_, AppState>) -> AppResult<Vec<Game>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut changed = Vec::new();
+        for g in db.list_games()? {
+            if !g.cover_image_url.is_empty() || g.category == Category::Launcher {
+                continue;
+            }
+            if let Some(url) = detect::auto_cover(&g.install_dir, &g.executable_path) {
+                if db.set_cover_if_empty(g.id, &url)? {
+                    changed.push(db.get_game(g.id)?);
+                }
+            }
+        }
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| AppError::Other(e.to_string()))?
 }
 
 #[tauri::command]
@@ -411,13 +440,18 @@ pub fn resolve_detections(
                     continue;
                 };
                 let version = exe_info::scan(Path::new(&d.executable_path)).version;
+                let cover = detect::auto_cover(&d.install_dir, &d.executable_path);
                 added.push(state.db.insert_game(GameInput {
                     title: d.title,
                     executable_path: d.executable_path,
                     install_dir: d.install_dir,
-                    cover_image_url: String::new(),
+                    cover_image_url: cover.unwrap_or_default(),
                     version,
                     category: Category::Installed,
+                    description: String::new(),
+                    cover_zoom: 1.0,
+                    cover_x: 50.0,
+                    cover_y: 50.0,
                 })?);
                 done.push(key);
             }
@@ -587,6 +621,10 @@ mod tests {
             last_played_at: None,
             session_count: 0,
             exe_missing: false,
+            description: String::new(),
+            cover_zoom: 1.0,
+            cover_x: 50.0,
+            cover_y: 50.0,
         }
     }
 

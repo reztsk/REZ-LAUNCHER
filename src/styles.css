@@ -21,10 +21,16 @@
   --metal-line: rgb(212 212 216 / 0.38);
   --text: #f4f4f5;
   --muted: #a1a1aa;
+  /* accent duo (themes override these) */
+  --acc-1: #ffffff;
+  --acc-2: #d4d4d8;
+  --acc-3: #71717a;
+  --acc-rgb: 255 255 255;
+  --on-acc: #09090b;
   --dim: #71717a;
   --danger: #f87171;
   /* brushed metal */
-  --grad: linear-gradient(135deg, #ffffff 0%, #d4d4d8 45%, #8a8a93 100%);
+  --grad: linear-gradient(135deg, var(--acc-1) 0%, var(--acc-2) 45%, var(--acc-3) 100%);
   --card-min: 184px;
   color-scheme: dark;
 }
@@ -109,7 +115,7 @@ code {
   will-change: transform;
 }
 .bg-orbs span:nth-child(1) {
-  background: #d4d4d8;
+  background: var(--acc-2);
   top: -20vmax;
   left: -12vmax;
 }
@@ -166,7 +172,7 @@ code {
   font-weight: 700;
   letter-spacing: 0.25em;
   text-transform: uppercase;
-  color: #d4d4d8;
+  color: var(--acc-2);
 }
 
 /* ---------- Sidebar ---------- */
@@ -207,14 +213,14 @@ code {
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--grad);
-  box-shadow: 0 0 12px rgb(255 255 255 / 0.45);
+  box-shadow: 0 0 12px rgb(var(--acc-rgb) / 0.45);
 }
 .nav-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #fafafa;
-  box-shadow: 0 0 10px rgb(255 255 255 / 0.8);
+  background: var(--acc-1);
+  box-shadow: 0 0 10px rgb(var(--acc-rgb) / 0.8);
 }
 
 /* ---------- Buttons ---------- */
@@ -245,17 +251,17 @@ code {
   pointer-events: none;
 }
 .btn-primary {
-  color: #09090b;
-  background: linear-gradient(180deg, #ffffff, #d4d4d8);
-  border: 1px solid rgb(255 255 255 / 0.7);
+  color: var(--on-acc);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
+  border: 1px solid rgb(var(--acc-rgb) / 0.7);
   box-shadow:
-    0 6px 22px -8px rgb(255 255 255 / 0.4),
+    0 6px 22px -8px rgb(var(--acc-rgb) / 0.4),
     inset 0 -1px 0 rgb(0 0 0 / 0.12);
 }
 .btn-primary:hover {
-  background: linear-gradient(180deg, #ffffff, #e4e4e7);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-1));
   box-shadow:
-    0 8px 30px -8px rgb(255 255 255 / 0.6),
+    0 8px 30px -8px rgb(var(--acc-rgb) / 0.6),
     inset 0 -1px 0 rgb(0 0 0 / 0.12);
 }
 .btn-ghost {
@@ -352,7 +358,7 @@ select.field option {
     background 0.25s;
 }
 .switch[aria-checked="true"] {
-  background: linear-gradient(180deg, #fafafa, #d4d4d8);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
   border-color: transparent;
 }
 .switch[aria-checked="true"]::after {
@@ -383,7 +389,7 @@ select.field option {
   cursor: pointer;
 }
 .tab[aria-selected="true"] {
-  color: #09090b;
+  color: var(--on-acc);
 }
 .tab .count {
   margin-left: 6px;
@@ -396,8 +402,8 @@ select.field option {
   top: 4px;
   bottom: 4px;
   border-radius: 10px;
-  background: linear-gradient(180deg, #fafafa, #d4d4d8);
-  box-shadow: 0 0 18px -6px rgb(255 255 255 / 0.6);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
+  box-shadow: 0 0 18px -6px rgb(var(--acc-rgb) / 0.6);
   transition:
     left 0.45s var(--ease-out-expo),
     width 0.45s var(--ease-out-expo);
@@ -447,7 +453,7 @@ select.field option {
   box-shadow:
     0 26px 50px -16px rgb(0 0 0 / 0.95),
     0 0 0 1px var(--metal-line),
-    0 0 36px -10px rgb(255 255 255 / 0.3);
+    0 0 36px -10px rgb(var(--acc-rgb) / 0.3);
 }
 :root.no-tilt .card:hover .cover {
   transform: translateY(-4px);
@@ -532,8 +538,8 @@ select.field option {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  color: #09090b;
-  background: linear-gradient(180deg, #ffffff, #d4d4d8);
+  color: var(--on-acc);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
   box-shadow:
     0 0 0 6px rgb(255 255 255 / 0.1),
     0 12px 40px -6px rgb(0 0 0 / 0.9);
@@ -573,10 +579,10 @@ select.field option {
   color: #d4d4d8;
 }
 .badge-live {
-  color: #09090b;
+  color: var(--on-acc);
   border-color: transparent;
-  background: linear-gradient(180deg, #ffffff, #d4d4d8);
-  box-shadow: 0 0 18px -2px rgb(255 255 255 / 0.55);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
+  box-shadow: 0 0 18px -2px rgb(var(--acc-rgb) / 0.55);
 }
 .badge-live .dot {
   width: 7px;
@@ -602,8 +608,8 @@ select.field option {
 }
 .card.is-running .cover {
   box-shadow:
-    0 0 0 2px rgb(250 250 250 / 0.85),
-    0 0 46px -6px rgb(255 255 255 / 0.45);
+    0 0 0 2px rgb(var(--acc-rgb) / 0.85),
+    0 0 46px -6px rgb(var(--acc-rgb) / 0.45);
 }
 
 .playtime {
@@ -819,10 +825,10 @@ select.field option {
   transition: all 0.3s var(--ease-spring);
 }
 .slide.done .slide-num {
-  color: #09090b;
+  color: var(--on-acc);
   border-color: transparent;
-  background: linear-gradient(180deg, #ffffff, #d4d4d8);
-  box-shadow: 0 0 16px -2px rgb(255 255 255 / 0.5);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
+  box-shadow: 0 0 16px -2px rgb(var(--acc-rgb) / 0.5);
 }
 .dots {
   display: flex;
@@ -839,11 +845,11 @@ select.field option {
     background 0.25s;
 }
 .dots button.done {
-  background: rgb(255 255 255 / 0.45);
+  background: rgb(var(--acc-rgb) / 0.45);
 }
 .dots button[aria-current="step"] {
   width: 26px;
-  background: #fafafa;
+  background: var(--acc-2);
 }
 
 /* ---------- Settings ---------- */
@@ -935,7 +941,7 @@ select.field option {
 }
 .check:checked {
   border-color: transparent;
-  background: #fafafa
+  background: var(--acc-2)
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2309090b' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E")
     center/12px no-repeat;
 }
@@ -1023,8 +1029,8 @@ select.field option {
   transition: all 0.25s;
 }
 .seg input:checked + span {
-  color: #09090b;
-  background: linear-gradient(180deg, #fafafa, #d4d4d8);
+  color: var(--on-acc);
+  background: linear-gradient(180deg, var(--acc-1), var(--acc-2));
 }
 .seg input:focus-visible + span {
   outline: 2px solid #e4e4e7;
